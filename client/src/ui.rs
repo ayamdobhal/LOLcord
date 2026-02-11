@@ -44,6 +44,10 @@ pub struct App {
     connect_tx: std_mpsc::Sender<ConnectResult>,
     /// Stash selected device indices before async connect
     pending_devices: Option<(Option<usize>, Option<usize>)>,
+    /// System tray icon (kept alive)
+    _tray: Option<tray_icon::TrayIcon>,
+    /// Tray command receiver
+    tray_rx: Option<std_mpsc::Receiver<crate::tray::TrayCommand>>,
 }
 
 enum Screen {
@@ -100,6 +104,11 @@ impl App {
         let input_devices = devices::list_input_devices();
         let output_devices = devices::list_output_devices();
 
+        let (tray, tray_rx) = match crate::tray::create_tray() {
+            Some((t, r)) => (Some(t), Some(r)),
+            None => (None, None),
+        };
+
         Self {
             state: Screen::Login {
                 server_addr: format!("127.0.0.1:{}", shared::DEFAULT_PORT),
@@ -118,6 +127,8 @@ impl App {
             connect_rx,
             connect_tx,
             pending_devices: None,
+            _tray: tray,
+            tray_rx,
         }
     }
 
@@ -181,6 +192,47 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Minimize to tray on close (if tray is available and connected)
+        if self._tray.is_some() {
+            if let Screen::Connected { .. } = &self.state {
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+        }
+
+        // Handle tray commands
+        if let Some(ref tray_rx) = self.tray_rx {
+            while let Ok(cmd) = tray_rx.try_recv() {
+                match cmd {
+                    crate::tray::TrayCommand::Show => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    crate::tray::TrayCommand::ToggleMute => {
+                        if let Screen::Connected { ref audio, .. } = self.state {
+                            if let Some(ref a) = audio {
+                                let cur = a.muted.load(Ordering::Relaxed);
+                                a.muted.store(!cur, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    crate::tray::TrayCommand::ToggleDeafen => {
+                        if let Screen::Connected { ref audio, .. } = self.state {
+                            if let Some(ref a) = audio {
+                                let cur = a.deafened.load(Ordering::Relaxed);
+                                a.deafened.store(!cur, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    crate::tray::TrayCommand::Quit => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            }
+        }
+
         // Check for connection results
         if let Ok(result) = self.connect_rx.try_recv() {
             match result {
