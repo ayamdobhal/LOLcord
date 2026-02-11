@@ -174,7 +174,8 @@ impl eframe::App for App {
                             (Some(state), Some((input_stream, output_stream)))
                         }
                         Err(e) => {
-                            tracing::warn!("audio engine failed: {e}, voice disabled");
+                            tracing::error!("audio engine failed: {e:#}, voice disabled");
+                            eprintln!("AUDIO ERROR: {e:#}");
                             (None, None)
                         }
                     };
