@@ -398,9 +398,9 @@ impl eframe::App for App {
                                     .hint_text("type a message..."),
                             );
 
-                            let send = ui.button("→").clicked()
-                                || (response.has_focus()
-                                    && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                            let enter_pressed = response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let send = ui.button("→").clicked() || enter_pressed;
 
                             if send && !input.trim().is_empty() {
                                 let text = input.trim().to_string();
