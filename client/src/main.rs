@@ -25,8 +25,9 @@ fn load_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result {
-    // Log to file on Windows so we can debug
-    let log_file = std::fs::File::create("lolcord.log").ok();
+    // Log to file in config dir (overwrites each launch — no unbounded growth)
+    let log_path = settings::config_dir().join("lolcord.log");
+    let log_file = std::fs::File::create(log_path).ok();
     if let Some(file) = log_file {
         tracing_subscriber::fmt()
             .with_env_filter(

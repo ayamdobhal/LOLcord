@@ -25,13 +25,23 @@ pub struct Settings {
     pub vad_sensitivity: Option<f32>,
 }
 
+/// Return the `.lolcord` config directory (%APPDATA%/.lolcord on Windows, ~/.lolcord otherwise).
+/// Creates the directory if it doesn't exist.
+pub fn config_dir() -> PathBuf {
+    let base = if cfg!(target_os = "windows") {
+        std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+    } else {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    };
+    let dir = base.join(".lolcord");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn settings_path() -> PathBuf {
-    // Same directory as the executable, next to lolcord.log
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("lolcord-settings.json")
+    config_dir().join("settings.json")
 }
 
 impl Settings {

@@ -331,13 +331,11 @@ impl eframe::App for App {
             }
         }
 
-        // Minimize to tray on close (if tray is available and connected)
+        // Minimize to tray on close (if tray is available, regardless of screen)
         if self.tray_state.is_some() {
-            if let Screen::Connected { .. } = &self.state {
-                if ctx.input(|i| i.viewport().close_requested()) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
+            if ctx.input(|i| i.viewport().close_requested()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
         }
 
