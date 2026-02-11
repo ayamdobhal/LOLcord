@@ -33,6 +33,7 @@ enum ConnectResult {
         client_tx: tokio_mpsc::UnboundedSender<ClientMessage>,
         bridge_rx: std_mpsc::Receiver<ServerMessage>,
         user_ids: HashMap<String, u16>,
+        password: Option<String>,
     },
     Err(String),
 }
@@ -88,6 +89,8 @@ enum Screen {
         user_id_map: HashMap<String, u16>,
         /// Our own user_id
         our_user_id: u16,
+        /// E2E encryption key (derived from room password, if set)
+        encryption_key: Option<[u8; 32]>,
     },
 }
 
@@ -132,7 +135,7 @@ impl App {
         }
     }
 
-    fn initiate_connect(&self, ctx: &egui::Context, addr: String, username: String, room: String, password: String) {
+    fn initiate_connect(&self, ctx: &egui::Context, addr: String, username: String, room: String, password: String, raw_password: Option<String>) {
         let join_msg = ClientMessage::Join {
             username: username.clone(),
             room: room.clone(),
@@ -171,6 +174,7 @@ impl App {
                                 client_tx: conn.client_tx,
                                 bridge_rx,
                                 user_ids,
+                                password: raw_password,
                             });
                         }
                         Some(ServerMessage::Error { message }) => {
@@ -236,10 +240,15 @@ impl eframe::App for App {
         // Check for connection results
         if let Ok(result) = self.connect_rx.try_recv() {
             match result {
-                ConnectResult::Ok { room, username, mut users, user_id, room_id, voice_port, server_addr, client_tx, bridge_rx, user_ids: initial_user_ids } => {
+                ConnectResult::Ok { room, username, mut users, user_id, room_id, voice_port, server_addr, client_tx, bridge_rx, user_ids: initial_user_ids, password } => {
                     if !users.contains(&username) {
                         users.push(username.clone());
                     }
+
+                    // Derive E2E encryption key from password
+                    let encryption_key = password.as_ref()
+                        .filter(|p| !p.is_empty())
+                        .map(|p| crate::crypto::derive_key(p));
 
                     // Get selected devices from login state (saved before transition)
                     let (in_idx, out_idx) = self.pending_devices.take().unwrap_or((None, None));
@@ -261,7 +270,7 @@ impl eframe::App for App {
                             );
                             self.runtime.spawn(async move {
                                 if let Ok(addr) = voice_addr_str.parse() {
-                                    crate::voice::run(audio_clone, addr, room_id, user_id, jitter_clone, volumes_clone).await;
+                                    crate::voice::run(audio_clone, addr, room_id, user_id, jitter_clone, volumes_clone, encryption_key).await;
                                 }
                             });
                             (Some(state), Some((input_stream, output_stream)))
@@ -301,6 +310,7 @@ impl eframe::App for App {
                         user_volumes,
                         user_id_map: initial_user_ids,
                         our_user_id: user_id,
+                        encryption_key,
                     };
                 }
                 ConnectResult::Err(msg) => {
@@ -422,7 +432,8 @@ impl eframe::App for App {
                         let in_idx = input_devices.get(*selected_input).and_then(|d| Some(d.index)).flatten();
                         let out_idx = output_devices.get(*selected_output).and_then(|d| Some(d.index)).flatten();
                         self.pending_devices = Some((in_idx, out_idx));
-                        self.initiate_connect(ctx, addr, user, rm, pw);
+                        let raw_pw = if pw.is_empty() { None } else { Some(pw.clone()) };
+                        self.initiate_connect(ctx, addr, user, rm, pw, raw_pw);
                         if let Screen::Login { dispatched, .. } = &mut self.state {
                             *dispatched = true;
                         }
@@ -444,12 +455,29 @@ impl eframe::App for App {
                 user_volumes,
                 user_id_map,
                 our_user_id,
+                encryption_key,
                 ..
             } => {
                 // Poll incoming messages
                 while let Ok(msg) = bridge_rx.try_recv() {
                     match msg {
                         ServerMessage::Chat { from, text, .. } => {
+                            // Decrypt chat if encryption is active
+                            let text = if let Some(ref key) = encryption_key {
+                                // Try to decode base64 and decrypt
+                                use base64::Engine;
+                                match base64::engine::general_purpose::STANDARD.decode(&text) {
+                                    Ok(encrypted) => {
+                                        match crate::crypto::decrypt(key, &encrypted) {
+                                            Ok(plaintext) => String::from_utf8_lossy(&plaintext).to_string(),
+                                            Err(_) => text, // show raw if decrypt fails
+                                        }
+                                    }
+                                    Err(_) => text, // not encrypted, show as-is
+                                }
+                            } else {
+                                text
+                            };
                             messages.push(ChatMsg { from, text });
                         }
                         ServerMessage::UserJoined { username: u, user_id: uid } => {
@@ -685,8 +713,18 @@ impl eframe::App for App {
 
                             if send && !input.trim().is_empty() {
                                 let text = input.trim().to_string();
+                                // Encrypt chat text if encryption is active
+                                let wire_text = if let Some(ref key) = encryption_key {
+                                    use base64::Engine;
+                                    match crate::crypto::encrypt(key, text.as_bytes()) {
+                                        Ok(encrypted) => base64::engine::general_purpose::STANDARD.encode(&encrypted),
+                                        Err(_) => text.clone(),
+                                    }
+                                } else {
+                                    text.clone()
+                                };
                                 let _ = client_tx.send(ClientMessage::Chat {
-                                    text: text.clone(),
+                                    text: wire_text,
                                 });
                                 messages.push(ChatMsg {
                                     from: username.clone(),

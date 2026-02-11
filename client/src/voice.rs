@@ -1,13 +1,15 @@
 use crate::audio::AudioState;
+use crate::crypto;
 use crate::jitter::JitterBuffer;
 use shared::voice;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::net::UdpSocket;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Spawn voice send/receive tasks.
+/// `encryption_key`: if Some, encrypt/decrypt voice payloads (E2E).
 pub async fn run(
     audio: Arc<AudioState>,
     server_addr: SocketAddr,
@@ -15,6 +17,7 @@ pub async fn run(
     user_id: u16,
     jitter: Arc<Mutex<JitterBuffer>>,
     user_volumes: Arc<Mutex<HashMap<u16, f32>>>,
+    encryption_key: Option<[u8; 32]>,
 ) {
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => Arc::new(s),
@@ -24,11 +27,12 @@ pub async fn run(
         }
     };
 
-    info!("voice UDP bound to {:?}", socket.local_addr());
+    info!("voice UDP bound to {:?}, encrypted={}", socket.local_addr(), encryption_key.is_some());
 
     // Send task
     let send_socket = socket.clone();
     let send_audio = audio.clone();
+    let send_key = encryption_key;
     let send_handle = tokio::spawn(async move {
         let mut seq: u16 = 0;
         let frame_interval =
@@ -40,10 +44,23 @@ pub async fn run(
 
             if let Some(opus_data) = send_audio.try_encode_frame() {
                 let header = voice::encode_header(room_id, user_id, seq);
+
+                let payload = if let Some(ref key) = send_key {
+                    match crypto::encrypt(key, &opus_data) {
+                        Ok(encrypted) => encrypted,
+                        Err(e) => {
+                            warn!("voice encrypt error: {e}");
+                            continue;
+                        }
+                    }
+                } else {
+                    opus_data
+                };
+
                 let mut packet =
-                    Vec::with_capacity(voice::HEADER_SIZE + opus_data.len());
+                    Vec::with_capacity(voice::HEADER_SIZE + payload.len());
                 packet.extend_from_slice(&header);
-                packet.extend_from_slice(&opus_data);
+                packet.extend_from_slice(&payload);
 
                 if let Err(e) = send_socket.send_to(&packet, server_addr).await {
                     error!("voice send error: {e}");
@@ -57,8 +74,9 @@ pub async fn run(
     // Receive task — insert into jitter buffer
     let recv_socket = socket.clone();
     let recv_jitter = jitter.clone();
+    let recv_key = encryption_key;
     let recv_handle = tokio::spawn(async move {
-        let mut buf = [0u8; voice::MAX_PACKET_SIZE];
+        let mut buf = [0u8; voice::MAX_PACKET_SIZE + 40]; // extra room for nonce+tag
         loop {
             match recv_socket.recv_from(&mut buf).await {
                 Ok((len, _addr)) => {
@@ -69,7 +87,20 @@ pub async fn run(
                         if uid == user_id {
                             continue;
                         }
-                        let opus_data = buf[voice::HEADER_SIZE..len].to_vec();
+                        let encrypted_payload = &buf[voice::HEADER_SIZE..len];
+
+                        let opus_data = if let Some(ref key) = recv_key {
+                            match crypto::decrypt(key, encrypted_payload) {
+                                Ok(decrypted) => decrypted,
+                                Err(_) => {
+                                    // Decryption failed — wrong key or corrupted
+                                    continue;
+                                }
+                            }
+                        } else {
+                            encrypted_payload.to_vec()
+                        };
+
                         if let Ok(mut jb) = recv_jitter.lock() {
                             jb.insert(uid, seq, opus_data);
                         }

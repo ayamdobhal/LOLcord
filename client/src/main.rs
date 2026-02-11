@@ -1,4 +1,5 @@
 mod audio;
+mod crypto;
 mod devices;
 mod hotkeys;
 mod jitter;
