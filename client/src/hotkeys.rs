@@ -70,6 +70,51 @@ pub fn key_names() -> &'static [&'static str] {
     ]
 }
 
+/// Convert a Keycode back to a display name.
+pub fn keycode_to_name(kc: &Keycode) -> String {
+    match kc {
+        Keycode::A => "A", Keycode::B => "B", Keycode::C => "C", Keycode::D => "D",
+        Keycode::E => "E", Keycode::F => "F", Keycode::G => "G", Keycode::H => "H",
+        Keycode::I => "I", Keycode::J => "J", Keycode::K => "K", Keycode::L => "L",
+        Keycode::M => "M", Keycode::N => "N", Keycode::O => "O", Keycode::P => "P",
+        Keycode::Q => "Q", Keycode::R => "R", Keycode::S => "S", Keycode::T => "T",
+        Keycode::U => "U", Keycode::V => "V", Keycode::W => "W", Keycode::X => "X",
+        Keycode::Y => "Y", Keycode::Z => "Z",
+        Keycode::Key0 => "0", Keycode::Key1 => "1", Keycode::Key2 => "2",
+        Keycode::Key3 => "3", Keycode::Key4 => "4", Keycode::Key5 => "5",
+        Keycode::Key6 => "6", Keycode::Key7 => "7", Keycode::Key8 => "8",
+        Keycode::Key9 => "9",
+        Keycode::F1 => "F1", Keycode::F2 => "F2", Keycode::F3 => "F3",
+        Keycode::F4 => "F4", Keycode::F5 => "F5", Keycode::F6 => "F6",
+        Keycode::F7 => "F7", Keycode::F8 => "F8", Keycode::F9 => "F9",
+        Keycode::F10 => "F10", Keycode::F11 => "F11", Keycode::F12 => "F12",
+        Keycode::Space => "Space", Keycode::Tab => "Tab",
+        Keycode::CapsLock => "CapsLock",
+        Keycode::LShift => "LShift", Keycode::RShift => "RShift",
+        Keycode::LControl => "LCtrl", Keycode::RControl => "RCtrl",
+        Keycode::LAlt => "LAlt", Keycode::RAlt => "RAlt",
+        Keycode::Escape => "Escape", Keycode::Enter => "Enter",
+        Keycode::Backspace => "Backspace",
+        Keycode::Up => "Up", Keycode::Down => "Down",
+        Keycode::Left => "Left", Keycode::Right => "Right",
+        Keycode::Grave => "`", Keycode::Minus => "-", Keycode::Equal => "=",
+        Keycode::LeftBracket => "[", Keycode::RightBracket => "]",
+        Keycode::BackSlash => "\\", Keycode::Semicolon => ";",
+        Keycode::Apostrophe => "'", Keycode::Comma => ",",
+        Keycode::Dot => ".", Keycode::Slash => "/",
+        other => return format!("{:?}", other),
+    }.to_string()
+}
+
+/// Poll for any key press. Returns the first key detected.
+/// Used for the "press any key" PTT binding capture.
+pub fn capture_any_key() -> Option<Keycode> {
+    let device_state = DeviceState::new();
+    let keys = device_state.get_keys();
+    // Filter out Escape (used to cancel) and common modifier-only presses
+    keys.into_iter().next()
+}
+
 /// Polls global keyboard state in a background thread.
 /// Updates `audio.ptt_active` based on the configured PTT key.
 pub fn spawn_global_hotkey_thread(

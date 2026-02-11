@@ -109,8 +109,10 @@ enum Screen {
         hotkey_running: Option<Arc<AtomicBool>>,
         /// Current PTT key (shared with hotkey thread)
         ptt_key: Arc<Mutex<Keycode>>,
-        /// Index into key_names for the UI dropdown
-        ptt_key_idx: usize,
+        /// Display name of current PTT key
+        ptt_key_name: String,
+        /// Whether we're listening for a key press to rebind PTT
+        listening_for_ptt: bool,
         /// Open mic vs PTT mode
         use_open_mic: bool,
         /// Per-user volume multipliers shared with voice thread
@@ -401,7 +403,8 @@ impl eframe::App for App {
                         _streams: streams,
                         hotkey_running: Some(hotkey_running),
                         ptt_key,
-                        ptt_key_idx: 0, // "V" is index 0 in key_names()
+                        ptt_key_name: "V".to_string(),
+                        listening_for_ptt: false,
                         use_open_mic: true, // default: open mic
                         user_volumes,
                         user_id_map: initial_user_ids,
@@ -561,7 +564,8 @@ impl eframe::App for App {
                 bridge_rx,
                 audio,
                 ptt_key,
-                ptt_key_idx,
+                ptt_key_name,
+                listening_for_ptt,
                 use_open_mic,
                 user_volumes,
                 user_id_map,
@@ -791,29 +795,32 @@ impl eframe::App for App {
 
                                 // PTT key selector (only show when PTT mode)
                                 if !*use_open_mic {
-                                    let names = hotkeys::key_names();
-                                    egui::ComboBox::from_id_salt("ptt_key")
-                                        .width(120.0)
-                                        .selected_text(format!(
-                                            "PTT: {}",
-                                            names.get(*ptt_key_idx).unwrap_or(&"?")
-                                        ))
-                                        .show_ui(ui, |ui| {
-                                            for (i, name) in names.iter().enumerate() {
-                                                if ui
-                                                    .selectable_value(ptt_key_idx, i, *name)
-                                                    .clicked()
-                                                {
-                                                    if let Some(kc) =
-                                                        hotkeys::keycode_from_name(name)
-                                                    {
-                                                        if let Ok(mut k) = ptt_key.lock() {
-                                                            *k = kc;
-                                                        }
-                                                    }
+                                    if *listening_for_ptt {
+                                        // Actively listening for a key press
+                                        let btn = ui.button("⏳ Press any key... (Esc to cancel)");
+                                        if btn.clicked() {
+                                            *listening_for_ptt = false;
+                                        }
+                                        // Poll for key press via device_query
+                                        if let Some(kc) = hotkeys::capture_any_key() {
+                                            if matches!(kc, Keycode::Escape) {
+                                                // Cancel
+                                                *listening_for_ptt = false;
+                                            } else {
+                                                *ptt_key_name = hotkeys::keycode_to_name(&kc);
+                                                if let Ok(mut k) = ptt_key.lock() {
+                                                    *k = kc;
                                                 }
+                                                *listening_for_ptt = false;
                                             }
-                                        });
+                                        }
+                                        // Keep repainting while listening
+                                        ctx.request_repaint();
+                                    } else {
+                                        if ui.button(format!("🎤 PTT: {}", ptt_key_name)).clicked() {
+                                            *listening_for_ptt = true;
+                                        }
+                                    }
                                 }
 
                                 ui.separator();
