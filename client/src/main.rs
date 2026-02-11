@@ -4,6 +4,7 @@ mod devices;
 mod hotkeys;
 mod jitter;
 mod net;
+mod settings;
 mod tray;
 mod ui;
 mod voice;
