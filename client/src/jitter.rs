@@ -18,13 +18,12 @@ struct UserBuffer {
     primed: bool,
     /// Number of packets received before we start playing.
     buffered_count: usize,
-    /// Stats for connection quality
-    packets_received: u32,
-    packets_expected: u32,
-    /// Highest sequence number seen
-    max_seq_seen: u16,
-    /// Whether we've seen any packet yet
-    first_packet_seen: bool,
+    /// Stats for connection quality (per window)
+    window_received: u32,
+    /// First seq in current stats window
+    window_start_seq: Option<u16>,
+    /// Latest seq in current stats window
+    window_latest_seq: u16,
 }
 
 impl UserBuffer {
@@ -36,10 +35,9 @@ impl UserBuffer {
             play_seq: 0,
             primed: false,
             buffered_count: 0,
-            packets_received: 0,
-            packets_expected: 0,
-            max_seq_seen: 0,
-            first_packet_seen: false,
+            window_received: 0,
+            window_start_seq: None,
+            window_latest_seq: 0,
         }
     }
 
@@ -53,18 +51,15 @@ impl UserBuffer {
         }
 
         // Track stats for connection quality
-        self.packets_received += 1;
-        if !self.first_packet_seen {
-            self.max_seq_seen = seq;
-            self.first_packet_seen = true;
+        self.window_received += 1;
+        if self.window_start_seq.is_none() {
+            self.window_start_seq = Some(seq);
+            self.window_latest_seq = seq;
         } else {
-            // Count expected packets based on seq gap
-            let gap = seq.wrapping_sub(self.max_seq_seen);
-            if gap > 0 && gap < 1000 {
-                self.packets_expected += gap as u32;
-            }
-            if seq.wrapping_sub(self.max_seq_seen) < 32768 {
-                self.max_seq_seen = seq;
+            // Update latest seq if this is ahead (with wrapping)
+            let fwd = seq.wrapping_sub(self.window_latest_seq);
+            if fwd > 0 && fwd < 32768 {
+                self.window_latest_seq = seq;
             }
         }
 
@@ -188,10 +183,15 @@ impl JitterBuffer {
     pub fn get_quality_stats(&self) -> HashMap<u16, f32> {
         let mut stats = HashMap::new();
         for (&uid, buf) in &self.users {
-            if buf.packets_expected > 0 {
-                let lost = buf.packets_expected.saturating_sub(buf.packets_received);
-                let loss_pct = (lost as f32 / buf.packets_expected as f32) * 100.0;
-                stats.insert(uid, loss_pct);
+            if let Some(start) = buf.window_start_seq {
+                let expected = buf.window_latest_seq.wrapping_sub(start) as u32 + 1;
+                if expected > 0 && expected < 10000 {
+                    let lost = expected.saturating_sub(buf.window_received);
+                    let loss_pct = (lost as f32 / expected as f32) * 100.0;
+                    stats.insert(uid, loss_pct);
+                } else {
+                    stats.insert(uid, 0.0);
+                }
             } else {
                 stats.insert(uid, 0.0);
             }
@@ -202,8 +202,9 @@ impl JitterBuffer {
     /// Reset quality stats (call periodically to get recent stats).
     pub fn reset_quality_stats(&mut self) {
         for buf in self.users.values_mut() {
-            buf.packets_received = 0;
-            buf.packets_expected = 0;
+            buf.window_received = 0;
+            buf.window_start_seq = None;
+            buf.window_latest_seq = 0;
         }
     }
 }

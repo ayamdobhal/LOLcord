@@ -4,9 +4,39 @@ use crate::jitter::JitterBuffer;
 use shared::voice;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc, Mutex,
+};
 use tokio::net::UdpSocket;
 use tracing::{error, info, warn};
+
+/// Shared upload quality stats.
+pub struct UploadStats {
+    pub packets_sent: AtomicU32,
+    pub packets_failed: AtomicU32,
+}
+
+impl UploadStats {
+    pub fn new() -> Self {
+        Self {
+            packets_sent: AtomicU32::new(0),
+            packets_failed: AtomicU32::new(0),
+        }
+    }
+
+    /// Get and reset upload loss percentage.
+    pub fn take_loss_percent(&self) -> f32 {
+        let sent = self.packets_sent.swap(0, Ordering::Relaxed);
+        let failed = self.packets_failed.swap(0, Ordering::Relaxed);
+        let total = sent + failed;
+        if total == 0 {
+            0.0
+        } else {
+            (failed as f32 / total as f32) * 100.0
+        }
+    }
+}
 
 /// Spawn voice send/receive tasks.
 /// `encryption_key`: if Some, encrypt/decrypt voice payloads (E2E).
@@ -18,6 +48,7 @@ pub async fn run(
     jitter: Arc<Mutex<JitterBuffer>>,
     user_volumes: Arc<Mutex<HashMap<u16, f32>>>,
     encryption_key: Option<[u8; 32]>,
+    upload_stats: Arc<UploadStats>,
 ) {
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => Arc::new(s),
@@ -62,9 +93,15 @@ pub async fn run(
                 packet.extend_from_slice(&header);
                 packet.extend_from_slice(&payload);
 
-                if let Err(e) = send_socket.send_to(&packet, server_addr).await {
-                    error!("voice send error: {e}");
-                    break;
+                match send_socket.send_to(&packet, server_addr).await {
+                    Ok(_) => {
+                        upload_stats.packets_sent.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        upload_stats.packets_failed.fetch_add(1, Ordering::Relaxed);
+                        error!("voice send error: {e}");
+                        break;
+                    }
                 }
                 seq = seq.wrapping_add(1);
             }

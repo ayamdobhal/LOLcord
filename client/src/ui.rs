@@ -123,6 +123,10 @@ enum Screen {
         quality_stats: HashMap<u16, f32>,
         /// Last time quality stats were updated
         quality_update: std::time::Instant,
+        /// Upload quality stats (shared with voice thread)
+        upload_stats: Arc<crate::voice::UploadStats>,
+        /// Cached upload loss %
+        upload_loss: f32,
         /// E2E encryption key (derived from room password, if set)
         encryption_key: Option<[u8; 32]>,
         /// Original connection params for reconnect
@@ -310,9 +314,10 @@ impl eframe::App for App {
                     // Get selected devices from login state (saved before transition)
                     let (in_idx, out_idx) = self.pending_devices.take().unwrap_or((None, None));
 
-                    // Create jitter buffer and volume map
+                    // Create jitter buffer, volume map, and upload stats
                     let jitter = Arc::new(Mutex::new(JitterBuffer::new()));
                     let user_volumes: Arc<Mutex<HashMap<u16, f32>>> = Arc::new(Mutex::new(HashMap::new()));
+                    let upload_stats = Arc::new(crate::voice::UploadStats::new());
 
                     // Start audio engine
                     let (audio, streams) = match audio::start_audio(in_idx, out_idx) {
@@ -325,9 +330,10 @@ impl eframe::App for App {
                                 server_addr.split(':').next().unwrap_or("127.0.0.1"),
                                 voice_port
                             );
+                            let upload_stats_clone = upload_stats.clone();
                             self.runtime.spawn(async move {
                                 if let Ok(addr) = voice_addr_str.parse() {
-                                    crate::voice::run(audio_clone, addr, room_id, user_id, jitter_clone, volumes_clone, encryption_key).await;
+                                    crate::voice::run(audio_clone, addr, room_id, user_id, jitter_clone, volumes_clone, encryption_key, upload_stats_clone).await;
                                 }
                             });
                             (Some(state), Some((input_stream, output_stream)))
@@ -385,6 +391,8 @@ impl eframe::App for App {
                         user_volumes,
                         user_id_map: initial_user_ids,
                         our_user_id: user_id,
+                        upload_stats,
+                        upload_loss: 0.0,
                         encryption_key,
                         connect_params: Some(rp),
                         reconnect_state: ReconnectState::Connected,
@@ -539,6 +547,8 @@ impl eframe::App for App {
                 user_volumes,
                 user_id_map,
                 our_user_id,
+                upload_stats,
+                upload_loss,
                 encryption_key,
                 reconnect_state,
                 connect_params,
@@ -653,6 +663,7 @@ impl eframe::App for App {
                         *quality_stats = jb.get_quality_stats();
                         jb.reset_quality_stats();
                     }
+                    *upload_loss = upload_stats.take_loss_percent();
                     *quality_update = std::time::Instant::now();
                 }
 
@@ -851,12 +862,16 @@ impl eframe::App for App {
                             if let Some(ref rs) = reconnect_status {
                                 ui.colored_label(egui::Color32::YELLOW, rs);
                             } else {
+                                let upload_icon = if *upload_loss < 2.0 { "🟢" }
+                                    else if *upload_loss < 10.0 { "🟡" }
+                                    else { "🔴" };
                                 ui.label(format!(
-                                    "{} {} · Room: {} · {} online",
+                                    "{} {} · Room: {} · {} online · Upload {}",
                                     voice_status,
                                     username,
                                     room,
-                                    users.len()
+                                    users.len(),
+                                    upload_icon,
                                 ));
                             }
                         });
