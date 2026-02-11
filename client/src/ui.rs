@@ -32,6 +32,7 @@ enum ConnectResult {
         server_addr: String,
         client_tx: tokio_mpsc::UnboundedSender<ClientMessage>,
         bridge_rx: std_mpsc::Receiver<ServerMessage>,
+        user_ids: HashMap<String, u16>,
     },
     Err(String),
 }
@@ -135,7 +136,7 @@ impl App {
                 Ok(mut conn) => {
                     let first = conn.server_rx.recv().await;
                     match first {
-                        Some(ServerMessage::RoomState { room: r, users, user_id, room_id, voice_port }) => {
+                        Some(ServerMessage::RoomState { room: r, users, user_id, room_id, voice_port, user_ids }) => {
                             let (bridge_tx, bridge_rx) = std_mpsc::channel();
                             let ctx2 = ctx.clone();
 
@@ -158,6 +159,7 @@ impl App {
                                 server_addr: addr,
                                 client_tx: conn.client_tx,
                                 bridge_rx,
+                                user_ids,
                             });
                         }
                         Some(ServerMessage::Error { message }) => {
@@ -182,7 +184,7 @@ impl eframe::App for App {
         // Check for connection results
         if let Ok(result) = self.connect_rx.try_recv() {
             match result {
-                ConnectResult::Ok { room, username, mut users, user_id, room_id, voice_port, server_addr, client_tx, bridge_rx } => {
+                ConnectResult::Ok { room, username, mut users, user_id, room_id, voice_port, server_addr, client_tx, bridge_rx, user_ids: initial_user_ids } => {
                     if !users.contains(&username) {
                         users.push(username.clone());
                     }
@@ -245,7 +247,7 @@ impl eframe::App for App {
                         ptt_key_idx: 0, // "V" is index 0 in key_names()
                         use_open_mic: true, // default: open mic
                         user_volumes,
-                        user_id_map: HashMap::new(),
+                        user_id_map: initial_user_ids,
                         our_user_id: user_id,
                     };
                 }
@@ -388,8 +390,8 @@ impl eframe::App for App {
                 ptt_key_idx,
                 use_open_mic,
                 user_volumes,
-                user_id_map: _user_id_map,
-                our_user_id: _our_user_id,
+                user_id_map,
+                our_user_id,
                 ..
             } => {
                 // Poll incoming messages
@@ -398,9 +400,12 @@ impl eframe::App for App {
                         ServerMessage::Chat { from, text, .. } => {
                             messages.push(ChatMsg { from, text });
                         }
-                        ServerMessage::UserJoined { username: u } => {
+                        ServerMessage::UserJoined { username: u, user_id: uid } => {
                             if !users.contains(&u) {
                                 users.push(u.clone());
+                            }
+                            if let Some(uid) = uid {
+                                user_id_map.insert(u.clone(), uid);
                             }
                             messages.push(ChatMsg {
                                 from: "system".into(),
@@ -430,12 +435,31 @@ impl eframe::App for App {
                         ui.heading(format!("🔊 {room}"));
                         ui.separator();
                         for user in users.iter() {
-                            let label = if user == username.as_str() {
-                                format!("🎤 {user} (you)")
+                            if user == username.as_str() {
+                                ui.label(format!("🎤 {user} (you)"));
                             } else {
-                                format!("🔊 {user}")
-                            };
-                            ui.label(label);
+                                ui.label(format!("🔊 {user}"));
+                                // Per-user volume slider
+                                if let Some(&uid) = user_id_map.get(user) {
+                                    let mut vol = user_volumes
+                                        .lock()
+                                        .ok()
+                                        .and_then(|v| v.get(&uid).copied())
+                                        .unwrap_or(1.0);
+                                    let vol_pct = (vol * 100.0) as u32;
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().slider_width = 80.0;
+                                        if ui.add(egui::Slider::new(&mut vol, 0.0..=2.0)
+                                            .text(format!("{vol_pct}%"))
+                                            .show_value(false)
+                                        ).changed() {
+                                            if let Ok(mut vols) = user_volumes.lock() {
+                                                vols.insert(uid, vol);
+                                            }
+                                        }
+                                    });
+                                }
+                            }
                         }
 
                         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {

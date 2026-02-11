@@ -43,13 +43,13 @@ impl RoomManager {
         }
     }
 
-    /// Join a room. Returns (existing usernames, assigned user_id, room_id).
+    /// Join a room. Returns (existing usernames, assigned user_id, room_id, user_id_map).
     pub async fn join(
         &self,
         room_name: &str,
         username: &str,
         password: Option<&str>,
-    ) -> Result<(Vec<String>, u16, u16)> {
+    ) -> Result<(Vec<String>, u16, u16, HashMap<String, u16>)> {
         let mut rooms = self.rooms.write().await;
         let room = rooms
             .entry(room_name.to_string())
@@ -74,6 +74,9 @@ impl RoomManager {
         }
 
         let users: Vec<String> = room.members.keys().cloned().collect();
+        let user_ids: HashMap<String, u16> = room.members.iter()
+            .map(|(name, member)| (name.clone(), member.user_id))
+            .collect();
         let user_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
         let room_id = room.room_id;
 
@@ -82,7 +85,7 @@ impl RoomManager {
             users.len() + 1
         );
 
-        Ok((users, user_id, room_id))
+        Ok((users, user_id, room_id, user_ids))
     }
 
     pub async fn subscribe(

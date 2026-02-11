@@ -29,9 +29,14 @@ pub enum ServerMessage {
         room_id: u16,
         /// UDP port for voice traffic
         voice_port: u16,
+        /// Map of existing usernames to their user IDs
+        #[serde(default)]
+        user_ids: std::collections::HashMap<String, u16>,
     },
     UserJoined {
         username: String,
+        #[serde(default)]
+        user_id: Option<u16>,
     },
     UserLeft {
         username: String,

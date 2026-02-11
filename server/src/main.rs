@@ -108,13 +108,14 @@ async fn handle_client(
             password,
         } => {
             match rooms.join(&room, &username, password.as_deref()).await {
-                Ok((users, user_id, room_id)) => {
+                Ok((users, user_id, room_id, user_ids)) => {
                     let state = ServerMessage::RoomState {
                         room: room.clone(),
                         users,
                         user_id,
                         room_id,
                         voice_port,
+                        user_ids,
                     };
                     protocol::write_message(&mut writer, &state).await?;
                     (username, room, user_id)
@@ -146,6 +147,7 @@ async fn handle_client(
             &username,
             ServerMessage::UserJoined {
                 username: username.clone(),
+                user_id: Some(user_id),
             },
         )
         .await;
