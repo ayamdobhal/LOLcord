@@ -5,6 +5,52 @@ use std::sync::{
     Arc,
 };
 
+/// A PTT binding — either a keyboard key or a mouse button.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PttBind {
+    Key(Keycode),
+    Mouse(u8), // button number: 2=right, 3=middle, 4=mouse4, 5=mouse5
+}
+
+impl PttBind {
+    /// Display name for the binding.
+    pub fn display_name(&self) -> String {
+        match self {
+            PttBind::Key(kc) => keycode_to_name(kc),
+            PttBind::Mouse(btn) => mouse_button_name(*btn),
+        }
+    }
+
+    /// Serialize to a string for settings persistence.
+    pub fn to_setting_string(&self) -> String {
+        match self {
+            PttBind::Key(kc) => keycode_to_name(kc),
+            PttBind::Mouse(btn) => mouse_button_name(*btn),
+        }
+    }
+
+    /// Deserialize from a settings string.
+    pub fn from_setting_string(s: &str) -> Option<PttBind> {
+        match s {
+            "Mouse2" | "MouseRight" => Some(PttBind::Mouse(2)),
+            "Mouse3" | "MouseMiddle" => Some(PttBind::Mouse(3)),
+            "Mouse4" => Some(PttBind::Mouse(4)),
+            "Mouse5" => Some(PttBind::Mouse(5)),
+            other => keycode_from_name(other).map(PttBind::Key),
+        }
+    }
+}
+
+fn mouse_button_name(btn: u8) -> String {
+    match btn {
+        2 => "Mouse2 (Right)".into(),
+        3 => "Mouse3 (Middle)".into(),
+        4 => "Mouse4".into(),
+        5 => "Mouse5".into(),
+        n => format!("Mouse{n}"),
+    }
+}
+
 /// Maps our key names to device_query Keycodes.
 pub fn keycode_from_name(name: &str) -> Option<Keycode> {
     match name.to_uppercase().as_str() {
@@ -35,23 +81,26 @@ pub fn keycode_from_name(name: &str) -> Option<Keycode> {
         "F10" => Some(Keycode::F10),
         "F11" => Some(Keycode::F11),
         "F12" => Some(Keycode::F12),
-        "MOUSE4" | "MOUSE5" => None, // not supported by device_query
         _ => {
             // Try single char
-            if name.len() == 1 {
-                let c = name.chars().next()?;
+            let upper = name.to_uppercase();
+            if upper.len() == 1 {
+                let c = upper.chars().next()?;
                 match c {
-                    'A'..='Z' => keycode_from_name(name),
-                    '0' => Some(Keycode::Key0),
-                    '1' => Some(Keycode::Key1),
-                    '2' => Some(Keycode::Key2),
-                    '3' => Some(Keycode::Key3),
-                    '4' => Some(Keycode::Key4),
-                    '5' => Some(Keycode::Key5),
-                    '6' => Some(Keycode::Key6),
-                    '7' => Some(Keycode::Key7),
-                    '8' => Some(Keycode::Key8),
-                    '9' => Some(Keycode::Key9),
+                    'A' => Some(Keycode::A), 'B' => Some(Keycode::B), 'C' => Some(Keycode::C),
+                    'D' => Some(Keycode::D), 'E' => Some(Keycode::E), 'F' => Some(Keycode::F),
+                    'G' => Some(Keycode::G), 'H' => Some(Keycode::H), 'I' => Some(Keycode::I),
+                    'J' => Some(Keycode::J), 'K' => Some(Keycode::K), 'L' => Some(Keycode::L),
+                    'M' => Some(Keycode::M), 'N' => Some(Keycode::N), 'O' => Some(Keycode::O),
+                    'P' => Some(Keycode::P), 'Q' => Some(Keycode::Q), 'R' => Some(Keycode::R),
+                    'S' => Some(Keycode::S), 'T' => Some(Keycode::T), 'U' => Some(Keycode::U),
+                    'V' => Some(Keycode::V), 'W' => Some(Keycode::W), 'X' => Some(Keycode::X),
+                    'Y' => Some(Keycode::Y), 'Z' => Some(Keycode::Z),
+                    '0' => Some(Keycode::Key0), '1' => Some(Keycode::Key1),
+                    '2' => Some(Keycode::Key2), '3' => Some(Keycode::Key3),
+                    '4' => Some(Keycode::Key4), '5' => Some(Keycode::Key5),
+                    '6' => Some(Keycode::Key6), '7' => Some(Keycode::Key7),
+                    '8' => Some(Keycode::Key8), '9' => Some(Keycode::Key9),
                     _ => None,
                 }
             } else {
@@ -59,15 +108,6 @@ pub fn keycode_from_name(name: &str) -> Option<Keycode> {
             }
         }
     }
-}
-
-pub fn key_names() -> &'static [&'static str] {
-    &[
-        "V", "B", "N", "M", "G", "T",
-        "CapsLock", "LAlt", "RAlt", "LCtrl", "RCtrl", "LShift", "RShift",
-        "Space", "Tab",
-        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
-    ]
 }
 
 /// Convert a Keycode back to a display name.
@@ -106,20 +146,34 @@ pub fn keycode_to_name(kc: &Keycode) -> String {
     }.to_string()
 }
 
-/// Poll for any key press. Returns the first key detected.
-/// Used for the "press any key" PTT binding capture.
-pub fn capture_any_key() -> Option<Keycode> {
+/// Poll for any input (key or mouse button press). Returns the first detected.
+/// Used for the "press any key/button" PTT binding capture.
+/// Filters out Mouse1 (left click) to avoid UI conflicts.
+pub fn capture_any_input() -> Option<PttBind> {
     let device_state = DeviceState::new();
+
+    // Check keyboard first
     let keys = device_state.get_keys();
-    // Filter out Escape (used to cancel) and common modifier-only presses
-    keys.into_iter().next()
+    if let Some(kc) = keys.into_iter().next() {
+        return Some(PttBind::Key(kc));
+    }
+
+    // Check mouse buttons (skip button 1 = left click)
+    let mouse = device_state.get_mouse();
+    for btn in 2..mouse.button_pressed.len() {
+        if mouse.button_pressed[btn] {
+            return Some(PttBind::Mouse(btn as u8));
+        }
+    }
+
+    None
 }
 
-/// Polls global keyboard state in a background thread.
-/// Updates `audio.ptt_active` based on the configured PTT key.
+/// Polls global keyboard and mouse state in a background thread.
+/// Updates `audio.ptt_active` based on the configured PTT binding.
 pub fn spawn_global_hotkey_thread(
     audio: Arc<AudioState>,
-    ptt_key: Arc<std::sync::Mutex<Keycode>>,
+    ptt_bind: Arc<std::sync::Mutex<PttBind>>,
     running: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
@@ -127,10 +181,19 @@ pub fn spawn_global_hotkey_thread(
         .spawn(move || {
             let device_state = DeviceState::new();
             while running.load(Ordering::Relaxed) {
-                let keys = device_state.get_keys();
-                let key = *ptt_key.lock().unwrap_or_else(|e| e.into_inner());
+                let bind = ptt_bind.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
-                let pressed = keys.contains(&key);
+                let pressed = match &bind {
+                    PttBind::Key(key) => {
+                        let keys = device_state.get_keys();
+                        keys.contains(key)
+                    }
+                    PttBind::Mouse(btn) => {
+                        let mouse = device_state.get_mouse();
+                        let idx = *btn as usize;
+                        idx < mouse.button_pressed.len() && mouse.button_pressed[idx]
+                    }
+                };
                 audio.ptt_active.store(pressed, Ordering::Relaxed);
 
                 // Poll at ~100Hz

@@ -1,9 +1,9 @@
 use crate::audio::{self, AudioState};
 use crate::devices::{self, DeviceInfo};
-use crate::hotkeys;
+use crate::hotkeys::{self, PttBind};
 use crate::jitter::JitterBuffer;
 use crate::net::Connection;
-use device_query::Keycode;
+use crate::settings::Settings;
 use eframe::egui;
 use shared::{ClientMessage, ServerMessage};
 use std::collections::HashMap;
@@ -79,6 +79,8 @@ pub struct App {
     tray_rx: Option<std_mpsc::Receiver<crate::tray::TrayCommand>>,
     /// Logo texture for login screen
     logo_texture: Option<egui::TextureHandle>,
+    /// Persisted settings
+    settings: Settings,
 }
 
 enum Screen {
@@ -107,10 +109,10 @@ enum Screen {
         _streams: Option<(cpal::Stream, cpal::Stream)>,
         /// Global hotkey thread alive flag
         hotkey_running: Option<Arc<AtomicBool>>,
-        /// Current PTT key (shared with hotkey thread)
-        ptt_key: Arc<Mutex<Keycode>>,
-        /// Display name of current PTT key
-        ptt_key_name: String,
+        /// Current PTT binding (shared with hotkey thread)
+        ptt_bind: Arc<Mutex<PttBind>>,
+        /// Display name of current PTT binding
+        ptt_bind_name: String,
         /// Whether we're listening for a key press to rebind PTT
         listening_for_ptt: bool,
         /// Open mic vs PTT mode
@@ -158,19 +160,29 @@ impl App {
             None => (None, None),
         };
 
+        // Load persisted settings
+        let settings = Settings::load();
+
+        let selected_input = settings.selected_input_device.as_ref()
+            .and_then(|name| input_devices.iter().position(|d| d.name == *name))
+            .unwrap_or(0);
+        let selected_output = settings.selected_output_device.as_ref()
+            .and_then(|name| output_devices.iter().position(|d| d.name == *name))
+            .unwrap_or(0);
+
         Self {
             state: Screen::Login {
-                server_addr: format!("127.0.0.1:{}", shared::DEFAULT_PORT),
-                username: String::new(),
-                room: String::from("general"),
+                server_addr: settings.server_addr.clone().unwrap_or_else(|| format!("127.0.0.1:{}", shared::DEFAULT_PORT)),
+                username: settings.username.clone().unwrap_or_default(),
+                room: settings.room.clone().unwrap_or_else(|| "general".into()),
                 password: String::new(),
                 error: None,
                 connecting: false,
                 dispatched: false,
                 input_devices,
                 output_devices,
-                selected_input: 0,
-                selected_output: 0,
+                selected_input,
+                selected_output,
             },
             runtime,
             connect_rx,
@@ -182,6 +194,7 @@ impl App {
             deferred_reconnect: None,
             deferred_go_login: None,
             logo_texture: None,
+            settings,
         }
     }
 
@@ -189,8 +202,54 @@ impl App {
         self.logo_texture.get_or_insert_with(|| {
             let bytes = include_bytes!("../assets/logo.png");
             let img = image::load_from_memory(bytes).expect("failed to load logo");
-            let rgba = img.into_rgba8();
-            let size = [rgba.width() as usize, rgba.height() as usize];
+            let mut rgba = img.into_rgba8();
+            let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+
+            // Remove pinkish gradient background by sampling corner colors
+            // and making pixels transparent if they're close to the background
+            {
+                // Sample the 4 corner pixels as background reference (image is RGB, alpha=255)
+                let corners = [
+                    (0usize, 0usize),
+                    (w - 1, 0),
+                    (0, h - 1),
+                    (w - 1, h - 1),
+                ];
+                let ref_colors: Vec<[f32; 3]> = corners.iter().map(|&(x, y)| {
+                    let p = rgba.get_pixel(x as u32, y as u32);
+                    [p[0] as f32, p[1] as f32, p[2] as f32]
+                }).collect();
+
+                // For each pixel, compute min color distance to any corner reference
+                // If close enough, make transparent (with soft edge)
+                let threshold = 55.0f32; // distance below which we consider it background
+                let soft_edge = 20.0f32; // fade zone
+
+                for y in 0..h {
+                    for x in 0..w {
+                        let p = rgba.get_pixel(x as u32, y as u32);
+                        let pc = [p[0] as f32, p[1] as f32, p[2] as f32];
+
+                        let min_dist = ref_colors.iter().map(|rc| {
+                            let dr = pc[0] - rc[0];
+                            let dg = pc[1] - rc[1];
+                            let db = pc[2] - rc[2];
+                            (dr * dr + dg * dg + db * db).sqrt()
+                        }).fold(f32::MAX, f32::min);
+
+                        if min_dist < threshold + soft_edge {
+                            let alpha = if min_dist < threshold {
+                                0u8
+                            } else {
+                                ((min_dist - threshold) / soft_edge * 255.0) as u8
+                            };
+                            rgba.get_pixel_mut(x as u32, y as u32)[3] = alpha;
+                        }
+                    }
+                }
+            }
+
+            let size = [w, h];
             let pixels = rgba.into_raw();
             let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
             ctx.load_texture("logo", color_image, egui::TextureOptions::LINEAR)
@@ -257,7 +316,40 @@ impl App {
     }
 }
 
+impl App {
+    fn save_settings_from_state(&mut self) {
+        match &self.state {
+            Screen::Login { server_addr, username, room, input_devices, output_devices, selected_input, selected_output, .. } => {
+                self.settings.server_addr = Some(server_addr.clone());
+                self.settings.username = Some(username.clone());
+                self.settings.room = Some(room.clone());
+                self.settings.selected_input_device = input_devices.get(*selected_input).map(|d| d.name.clone());
+                self.settings.selected_output_device = output_devices.get(*selected_output).map(|d| d.name.clone());
+            }
+            Screen::Connected { use_open_mic, ptt_bind, audio, .. } => {
+                self.settings.use_open_mic = Some(*use_open_mic);
+                if let Ok(b) = ptt_bind.lock() {
+                    self.settings.ptt_bind = Some(b.to_setting_string());
+                }
+                if let Some(ref a) = audio {
+                    self.settings.noise_suppression = Some(a.noise_suppression.load(Ordering::Relaxed));
+                    let ng_thresh = a.noise_gate_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
+                    self.settings.noise_gate_threshold = Some(ng_thresh);
+                    let vad_thresh = a.vad_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
+                    let sens = 1.0 - (vad_thresh - 0.001) / 0.099;
+                    self.settings.vad_sensitivity = Some(sens.clamp(0.0, 1.0));
+                }
+            }
+        }
+        self.settings.save();
+    }
+}
+
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_settings_from_state();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Minimize to tray on close (if tray is available and connected)
         if self._tray.is_some() {
@@ -363,14 +455,33 @@ impl eframe::App for App {
                     };
 
                     // Start global hotkey polling thread
-                    let ptt_key = Arc::new(Mutex::new(Keycode::V));
+                    let initial_bind = self.settings.ptt_bind.as_ref()
+                        .and_then(|s| PttBind::from_setting_string(s))
+                        .unwrap_or(PttBind::Key(device_query::Keycode::V));
+                    let ptt_bind_name = initial_bind.display_name();
+                    let ptt_bind = Arc::new(Mutex::new(initial_bind));
                     let hotkey_running = Arc::new(AtomicBool::new(true));
                     if let Some(ref a) = audio {
                         hotkeys::spawn_global_hotkey_thread(
                             a.clone(),
-                            ptt_key.clone(),
+                            ptt_bind.clone(),
                             hotkey_running.clone(),
                         );
+                    }
+
+                    // Apply persisted audio settings
+                    if let Some(ref a) = audio {
+                        if let Some(ns) = self.settings.noise_suppression {
+                            a.noise_suppression.store(ns, Ordering::Relaxed);
+                        }
+                        if let Some(ng) = self.settings.noise_gate_threshold {
+                            a.noise_gate_threshold.store((ng * 10000.0) as u32, Ordering::Relaxed);
+                        }
+                        if let Some(vad) = self.settings.vad_sensitivity {
+                            // sens 0..1 maps to threshold 0.001 + (1-sens)*0.099
+                            let thresh = 0.001 + (1.0 - vad) * 0.099;
+                            a.vad_threshold.store((thresh * 10000.0) as u32, Ordering::Relaxed);
+                        }
                     }
 
                     // Build reconnect params
@@ -402,10 +513,10 @@ impl eframe::App for App {
                         audio,
                         _streams: streams,
                         hotkey_running: Some(hotkey_running),
-                        ptt_key,
-                        ptt_key_name: "V".to_string(),
+                        ptt_bind,
+                        ptt_bind_name: ptt_bind_name,
                         listening_for_ptt: false,
-                        use_open_mic: true, // default: open mic
+                        use_open_mic: self.settings.use_open_mic.unwrap_or(true),
                         user_volumes,
                         user_id_map: initial_user_ids,
                         our_user_id: user_id,
@@ -535,7 +646,7 @@ impl eframe::App for App {
                     });
                 });
 
-                // Trigger connect outside the borrow (only once)
+                // Trigger connect outside the borrow (only once); save settings
                 if let Screen::Login { connecting: true, dispatched: false, server_addr, username, room, password, error, selected_input, selected_output, input_devices, output_devices, .. } = &self.state {
                     if error.is_none() {
                         let addr = server_addr.clone();
@@ -547,6 +658,7 @@ impl eframe::App for App {
                         let out_idx = output_devices.get(*selected_output).and_then(|d| Some(d.index)).flatten();
                         self.pending_devices = Some((in_idx, out_idx));
                         let raw_pw = if pw.is_empty() { None } else { Some(pw.clone()) };
+                        self.save_settings_from_state();
                         self.initiate_connect(ctx, addr, user, rm, pw, raw_pw, false);
                         if let Screen::Login { dispatched, .. } = &mut self.state {
                             *dispatched = true;
@@ -563,8 +675,8 @@ impl eframe::App for App {
                 client_tx,
                 bridge_rx,
                 audio,
-                ptt_key,
-                ptt_key_name,
+                ptt_bind,
+                ptt_bind_name,
                 listening_for_ptt,
                 use_open_mic,
                 user_volumes,
@@ -796,20 +908,19 @@ impl eframe::App for App {
                                 // PTT key selector (only show when PTT mode)
                                 if !*use_open_mic {
                                     if *listening_for_ptt {
-                                        // Actively listening for a key press
-                                        let btn = ui.button("⏳ Press any key... (Esc to cancel)");
+                                        // Actively listening for a key/mouse press
+                                        let btn = ui.button("⏳ Press any key/button... (Esc to cancel)");
                                         if btn.clicked() {
                                             *listening_for_ptt = false;
                                         }
-                                        // Poll for key press via device_query
-                                        if let Some(kc) = hotkeys::capture_any_key() {
-                                            if matches!(kc, Keycode::Escape) {
-                                                // Cancel
+                                        // Poll for input via device_query
+                                        if let Some(bind) = hotkeys::capture_any_input() {
+                                            if matches!(bind, PttBind::Key(device_query::Keycode::Escape)) {
                                                 *listening_for_ptt = false;
                                             } else {
-                                                *ptt_key_name = hotkeys::keycode_to_name(&kc);
-                                                if let Ok(mut k) = ptt_key.lock() {
-                                                    *k = kc;
+                                                *ptt_bind_name = bind.display_name();
+                                                if let Ok(mut b) = ptt_bind.lock() {
+                                                    *b = bind;
                                                 }
                                                 *listening_for_ptt = false;
                                             }
@@ -817,7 +928,7 @@ impl eframe::App for App {
                                         // Keep repainting while listening
                                         ctx.request_repaint();
                                     } else {
-                                        if ui.button(format!("🎤 PTT: {}", ptt_key_name)).clicked() {
+                                        if ui.button(format!("🎤 PTT: {}", ptt_bind_name)).clicked() {
                                             *listening_for_ptt = true;
                                         }
                                     }
@@ -965,6 +1076,7 @@ impl eframe::App for App {
 
         // Execute deferred reconnect actions (outside the state match to avoid borrow issues)
         if let Some(params) = self.deferred_go_login.take() {
+            self.save_settings_from_state();
             let input_devices = devices::list_input_devices();
             let output_devices = devices::list_output_devices();
             self.state = Screen::Login {
