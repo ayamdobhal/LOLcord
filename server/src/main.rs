@@ -42,19 +42,32 @@ async fn main() -> Result<()> {
     let udp = udp_socket.clone();
     tokio::spawn(async move {
         let mut buf = [0u8; voice::MAX_PACKET_SIZE];
+        let mut pkt_count: u64 = 0;
         loop {
             match udp.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
-                    if let Some((room_id, user_id, _seq)) = voice::decode_header(&buf[..len]) {
-                        // Register sender's address on first packet
-                        rooms_voice
+                    if let Some((room_id, user_id, seq)) = voice::decode_header(&buf[..len]) {
+                        let registered = rooms_voice
                             .register_voice_addr(room_id, user_id, addr)
                             .await;
 
-                        // Forward to all peers in the room
                         let peers = rooms_voice.get_voice_peers(room_id, user_id).await;
-                        for peer_addr in peers {
-                            let _ = udp.send_to(&buf[..len], peer_addr).await;
+
+                        pkt_count += 1;
+                        if pkt_count % 250 == 1 {
+                            info!(
+                                "UDP: pkt#{pkt_count} from {addr} room={room_id} user={user_id} seq={seq} len={len} registered={registered} peers={}",
+                                peers.len()
+                            );
+                        }
+
+                        for (peer_addr, peer_sock) in peers {
+                            // Use the per-client connected socket for forwarding.
+                            // This traverses NAT/firewalls better since the OS
+                            // treats it as part of an established "connection".
+                            if let Err(e) = peer_sock.send(&buf[..len]).await {
+                                warn!("UDP forward to {peer_addr} failed: {e}");
+                            }
                         }
                     }
                 }
