@@ -1,5 +1,7 @@
+mod audio;
 mod net;
 mod ui;
+mod voice;
 
 use eframe::egui;
 

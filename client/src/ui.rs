@@ -1,7 +1,12 @@
+use crate::audio::{self, AudioState};
 use crate::net::Connection;
 use eframe::egui;
 use shared::{ClientMessage, ServerMessage};
-use std::sync::mpsc as std_mpsc;
+use std::sync::{
+    atomic::Ordering,
+    mpsc as std_mpsc,
+    Arc,
+};
 use tokio::sync::mpsc as tokio_mpsc;
 
 /// Chat message for display.
@@ -16,6 +21,10 @@ enum ConnectResult {
         room: String,
         username: String,
         users: Vec<String>,
+        user_id: u16,
+        room_id: u16,
+        voice_port: u16,
+        server_addr: String,
         client_tx: tokio_mpsc::UnboundedSender<ClientMessage>,
         bridge_rx: std_mpsc::Receiver<ServerMessage>,
     },
@@ -49,6 +58,9 @@ enum Screen {
         input: String,
         client_tx: tokio_mpsc::UnboundedSender<ClientMessage>,
         bridge_rx: std_mpsc::Receiver<ServerMessage>,
+        audio: Option<Arc<AudioState>>,
+        /// Keep cpal streams alive
+        _streams: Option<(cpal::Stream, cpal::Stream)>,
     },
 }
 
@@ -91,14 +103,12 @@ impl App {
         self.runtime.spawn(async move {
             match Connection::connect(&addr, join_msg).await {
                 Ok(mut conn) => {
-                    // Read the first message — should be RoomState or Error
                     let first = conn.server_rx.recv().await;
                     match first {
-                        Some(ServerMessage::RoomState { room: r, users }) => {
+                        Some(ServerMessage::RoomState { room: r, users, user_id, room_id, voice_port }) => {
                             let (bridge_tx, bridge_rx) = std_mpsc::channel();
                             let ctx2 = ctx.clone();
 
-                            // Spawn bridge: forward remaining server msgs to std channel
                             tokio::spawn(async move {
                                 while let Some(msg) = conn.server_rx.recv().await {
                                     if bridge_tx.send(msg).is_err() {
@@ -112,6 +122,10 @@ impl App {
                                 room: r,
                                 username,
                                 users,
+                                user_id,
+                                room_id,
+                                voice_port,
+                                server_addr: addr,
                                 client_tx: conn.client_tx,
                                 bridge_rx,
                             });
@@ -138,11 +152,33 @@ impl eframe::App for App {
         // Check for connection results
         if let Ok(result) = self.connect_rx.try_recv() {
             match result {
-                ConnectResult::Ok { room, username, mut users, client_tx, bridge_rx } => {
-                    // Add ourselves to the user list
+                ConnectResult::Ok { room, username, mut users, user_id, room_id, voice_port, server_addr, client_tx, bridge_rx } => {
                     if !users.contains(&username) {
                         users.push(username.clone());
                     }
+
+                    // Start audio engine
+                    let (audio, streams) = match audio::start_audio() {
+                        Ok((state, input_stream, output_stream)) => {
+                            let audio_clone = state.clone();
+                            let voice_addr_str = format!(
+                                "{}:{}",
+                                server_addr.split(':').next().unwrap_or("127.0.0.1"),
+                                voice_port
+                            );
+                            self.runtime.spawn(async move {
+                                if let Ok(addr) = voice_addr_str.parse() {
+                                    crate::voice::run(audio_clone, addr, room_id, user_id).await;
+                                }
+                            });
+                            (Some(state), Some((input_stream, output_stream)))
+                        }
+                        Err(e) => {
+                            tracing::warn!("audio engine failed: {e}, voice disabled");
+                            (None, None)
+                        }
+                    };
+
                     self.state = Screen::Connected {
                         room,
                         username,
@@ -151,6 +187,8 @@ impl eframe::App for App {
                         input: String::new(),
                         client_tx,
                         bridge_rx,
+                        audio,
+                        _streams: streams,
                     };
                 }
                 ConnectResult::Err(msg) => {
@@ -247,6 +285,8 @@ impl eframe::App for App {
                 input,
                 client_tx,
                 bridge_rx,
+                audio,
+                _streams: _,
             } => {
                 // Poll incoming messages
                 while let Ok(msg) = bridge_rx.try_recv() {
@@ -274,6 +314,12 @@ impl eframe::App for App {
                     }
                 }
 
+                // Handle PTT key (V) — global-ish within the app window
+                if let Some(ref audio) = audio {
+                    let v_held = ctx.input(|i| i.key_down(egui::Key::V));
+                    audio.ptt_active.store(v_held, Ordering::Relaxed);
+                }
+
                 // Users panel (left)
                 egui::SidePanel::left("users_panel")
                     .default_width(150.0)
@@ -288,6 +334,29 @@ impl eframe::App for App {
                             };
                             ui.label(label);
                         }
+
+                        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                            if let Some(ref audio) = audio {
+                                let is_muted = audio.muted.load(Ordering::Relaxed);
+                                let is_deaf = audio.deafened.load(Ordering::Relaxed);
+                                let is_ptt = audio.ptt_active.load(Ordering::Relaxed);
+
+                                if is_ptt {
+                                    ui.colored_label(egui::Color32::from_rgb(80, 220, 80), "🎙 TRANSMITTING");
+                                }
+
+                                if ui.selectable_label(is_deaf, "🔇 Deafen").clicked() {
+                                    audio.deafened.store(!is_deaf, Ordering::Relaxed);
+                                }
+                                if ui.selectable_label(is_muted, "🔇 Mute").clicked() {
+                                    audio.muted.store(!is_muted, Ordering::Relaxed);
+                                }
+
+                                ui.small("Hold V to talk");
+                            } else {
+                                ui.colored_label(egui::Color32::YELLOW, "⚠ No audio");
+                            }
+                        });
                     });
 
                 // Status bar (very bottom)
@@ -295,8 +364,22 @@ impl eframe::App for App {
                     .exact_height(24.0)
                     .show(ctx, |ui| {
                         ui.horizontal_centered(|ui| {
+                            let voice_status = if let Some(ref audio) = audio {
+                                if audio.deafened.load(Ordering::Relaxed) {
+                                    "🔇"
+                                } else if audio.muted.load(Ordering::Relaxed) {
+                                    "🔇"
+                                } else if audio.ptt_active.load(Ordering::Relaxed) {
+                                    "🎙"
+                                } else {
+                                    "🎤"
+                                }
+                            } else {
+                                "⚠"
+                            };
                             ui.label(format!(
-                                "🎤 {} · Room: {} · {} online",
+                                "{} {} · Room: {} · {} online",
+                                voice_status,
                                 username,
                                 room,
                                 users.len()
