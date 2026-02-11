@@ -138,6 +138,7 @@ async fn handle_client(
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let direct_tx = tx.clone();
     rooms.subscribe(&room_name, &username, user_id, tx).await;
 
     rooms
@@ -178,6 +179,9 @@ async fn handle_client(
                         },
                     )
                     .await;
+            }
+            Ok(ClientMessage::Ping { ts }) => {
+                let _ = direct_tx.send(ServerMessage::Pong { ts });
             }
             Ok(ClientMessage::Leave) => break,
             Ok(ClientMessage::Join { .. }) => {}

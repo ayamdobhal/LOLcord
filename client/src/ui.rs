@@ -137,6 +137,10 @@ enum Screen {
         upload_stats: Arc<crate::voice::UploadStats>,
         /// Cached upload loss %
         upload_loss: f32,
+        /// Last measured latency (RTT) in ms
+        latency_ms: Option<u32>,
+        /// Last time we sent a ping
+        last_ping: std::time::Instant,
         /// E2E encryption key (derived from room password, if set)
         encryption_key: Option<[u8; 32]>,
         /// Original connection params for reconnect
@@ -335,6 +339,7 @@ impl eframe::App for App {
         if self.tray_state.is_some() {
             if ctx.input(|i| i.viewport().close_requested()) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
         }
@@ -516,6 +521,8 @@ impl eframe::App for App {
                         our_user_id: user_id,
                         upload_stats,
                         upload_loss: 0.0,
+                        latency_ms: None,
+                        last_ping: std::time::Instant::now(),
                         encryption_key,
                         connect_params: Some(rp),
                         reconnect_state: ReconnectState::Connected,
@@ -685,6 +692,8 @@ impl eframe::App for App {
                 our_user_id,
                 upload_stats,
                 upload_loss,
+                latency_ms,
+                last_ping,
                 encryption_key,
                 reconnect_state,
                 connect_params,
@@ -733,6 +742,13 @@ impl eframe::App for App {
                                     from: "system".into(),
                                     text: format!("{u} left"),
                                 });
+                            }
+                            ServerMessage::Pong { ts } => {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64;
+                                *latency_ms = Some((now.saturating_sub(ts)) as u32);
                             }
                             _ => {}
                         },
@@ -801,6 +817,16 @@ impl eframe::App for App {
                     }
                     *upload_loss = upload_stats.take_loss_percent();
                     *quality_update = std::time::Instant::now();
+                }
+
+                // Send ping every 2 seconds
+                if last_ping.elapsed() >= std::time::Duration::from_secs(2) {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    let _ = client_tx.send(ClientMessage::Ping { ts });
+                    *last_ping = std::time::Instant::now();
                 }
 
                 // Request repaint for live indicators (VAD, PTT)
@@ -1008,16 +1034,18 @@ impl eframe::App for App {
                             if let Some(ref rs) = reconnect_status {
                                 ui.colored_label(egui::Color32::YELLOW, rs);
                             } else {
-                                let upload_quality = if *upload_loss < 2.0 { "Good" }
-                                    else if *upload_loss < 10.0 { "Fair" }
-                                    else { "Poor" };
+                                let latency_str = match latency_ms {
+                                    Some(ms) => format!("{ms}ms"),
+                                    None => "...".to_string(),
+                                };
                                 ui.label(format!(
-                                    "{} {} · Room: {} · {} online · Upload: {}",
+                                    "{} {} · Room: {} · {} online · Loss: {:.1}% · Ping: {}",
                                     voice_status,
                                     username,
                                     room,
                                     users.len(),
-                                    upload_quality,
+                                    upload_loss,
+                                    latency_str,
                                 ));
                             }
                         });

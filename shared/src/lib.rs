@@ -14,6 +14,9 @@ pub enum ClientMessage {
     Chat {
         text: String,
     },
+    Ping {
+        ts: u64,
+    },
 }
 
 /// Server → Client messages
@@ -48,6 +51,9 @@ pub enum ServerMessage {
     },
     Error {
         message: String,
+    },
+    Pong {
+        ts: u64,
     },
 }
 
