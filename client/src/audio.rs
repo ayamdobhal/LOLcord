@@ -98,6 +98,13 @@ impl AudioState {
             prod.push_slice(&pcm_f32);
         }
     }
+
+    /// Push already-decoded PCM f32 samples into the playback buffer.
+    pub fn push_playback(&self, pcm: &[f32]) {
+        if let Ok(mut prod) = self.playback_prod.lock() {
+            prod.push_slice(pcm);
+        }
+    }
 }
 
 /// Find best matching stream config from supported ranges.

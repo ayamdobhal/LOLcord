@@ -3,26 +3,17 @@ use shared::{ServerMessage, MAX_ROOM_USERS};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::Arc;
-use tokio::net::UdpSocket;
 use tokio::sync::{RwLock, mpsc};
-use tracing::{info, warn};
+use tracing::info;
 
 static NEXT_ROOM_ID: AtomicU16 = AtomicU16::new(1);
 static NEXT_USER_ID: AtomicU16 = AtomicU16::new(1);
-
-pub struct VoiceEndpoint {
-    pub addr: SocketAddr,
-    /// A dedicated UDP socket `connect()`ed to this client's address.
-    /// Sending through this looks like a reply to the OS/firewall.
-    pub socket: Arc<UdpSocket>,
-}
 
 pub struct Member {
     pub tx: mpsc::UnboundedSender<ServerMessage>,
     pub user_id: u16,
     /// Set once the client sends its first UDP packet
-    pub voice: Option<VoiceEndpoint>,
+    pub voice_addr: Option<SocketAddr>,
 }
 
 struct Room {
@@ -67,7 +58,6 @@ impl RoomManager {
                 Room::new(rid, password.map(|s| s.to_string()))
             });
 
-        // Check password
         if let Some(ref room_pass) = room.password {
             match password {
                 Some(p) if p == room_pass => {}
@@ -109,7 +99,7 @@ impl RoomManager {
                 Member {
                     tx,
                     user_id,
-                    voice: None,
+                    voice_addr: None,
                 },
             );
         }
@@ -142,7 +132,6 @@ impl RoomManager {
     }
 
     /// Register a voice address for a user (called on first UDP packet).
-    /// Creates a per-client connected UDP socket for NAT/firewall traversal.
     pub async fn register_voice_addr(
         &self,
         room_id: u16,
@@ -154,27 +143,8 @@ impl RoomManager {
             if room.room_id == room_id {
                 for member in room.members.values_mut() {
                     if member.user_id == user_id {
-                        // If already registered to the same addr, skip
-                        if let Some(ref ep) = member.voice {
-                            if ep.addr == addr {
-                                return true;
-                            }
-                        }
-                        // Create a new connected socket for this client
-                        match create_connected_socket(addr).await {
-                            Ok(sock) => {
-                                info!("Created connected UDP socket for user {user_id} -> {addr}");
-                                member.voice = Some(VoiceEndpoint {
-                                    addr,
-                                    socket: Arc::new(sock),
-                                });
-                                return true;
-                            }
-                            Err(e) => {
-                                warn!("Failed to create connected socket for {addr}: {e}");
-                                return false;
-                            }
-                        }
+                        member.voice_addr = Some(addr);
+                        return true;
                     }
                 }
             }
@@ -182,41 +152,23 @@ impl RoomManager {
         false
     }
 
-    /// Get all voice endpoints in a room except the sender.
-    /// Returns (addr, connected_socket) pairs.
+    /// Get all voice addresses in a room except the sender.
     pub async fn get_voice_peers(
         &self,
         room_id: u16,
         sender_user_id: u16,
-    ) -> Vec<(SocketAddr, Arc<UdpSocket>)> {
+    ) -> Vec<SocketAddr> {
         let rooms = self.rooms.read().await;
         for room in rooms.values() {
             if room.room_id == room_id {
                 return room
                     .members
                     .values()
-                    .filter(|m| m.user_id != sender_user_id && m.voice.is_some())
-                    .map(|m| {
-                        let ep = m.voice.as_ref().unwrap();
-                        (ep.addr, ep.socket.clone())
-                    })
+                    .filter(|m| m.user_id != sender_user_id && m.voice_addr.is_some())
+                    .map(|m| m.voice_addr.unwrap())
                     .collect();
             }
         }
         Vec::new()
     }
-}
-
-/// Create a UDP socket bound to an ephemeral port and `connect()`ed to the
-/// target address. Sending on this socket looks like a reply to the client's
-/// OS/firewall/NAT, making it far more likely to pass through.
-async fn create_connected_socket(target: SocketAddr) -> Result<UdpSocket> {
-    let bind_addr = if target.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let sock = UdpSocket::bind(bind_addr).await?;
-    sock.connect(target).await?;
-    Ok(sock)
 }

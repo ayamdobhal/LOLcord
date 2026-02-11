@@ -61,11 +61,8 @@ async fn main() -> Result<()> {
                             );
                         }
 
-                        for (peer_addr, peer_sock) in peers {
-                            // Use the per-client connected socket for forwarding.
-                            // This traverses NAT/firewalls better since the OS
-                            // treats it as part of an established "connection".
-                            if let Err(e) = peer_sock.send(&buf[..len]).await {
+                        for peer_addr in peers {
+                            if let Err(e) = udp.send_to(&buf[..len], peer_addr).await {
                                 warn!("UDP forward to {peer_addr} failed: {e}");
                             }
                         }

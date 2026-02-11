@@ -1,10 +1,12 @@
 use crate::audio::{self, AudioState};
 use crate::devices::{self, DeviceInfo};
 use crate::hotkeys;
+use crate::jitter::JitterBuffer;
 use crate::net::Connection;
 use device_query::Keycode;
 use eframe::egui;
 use shared::{ClientMessage, ServerMessage};
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc as std_mpsc,
@@ -75,6 +77,12 @@ enum Screen {
         ptt_key_idx: usize,
         /// Open mic vs PTT mode
         use_open_mic: bool,
+        /// Per-user volume multipliers shared with voice thread
+        user_volumes: Arc<Mutex<HashMap<u16, f32>>>,
+        /// User ID mapping: username -> user_id (populated from voice packets)
+        user_id_map: HashMap<String, u16>,
+        /// Our own user_id
+        our_user_id: u16,
     },
 }
 
@@ -182,10 +190,16 @@ impl eframe::App for App {
                     // Get selected devices from login state (saved before transition)
                     let (in_idx, out_idx) = self.pending_devices.take().unwrap_or((None, None));
 
+                    // Create jitter buffer and volume map
+                    let jitter = Arc::new(Mutex::new(JitterBuffer::new()));
+                    let user_volumes: Arc<Mutex<HashMap<u16, f32>>> = Arc::new(Mutex::new(HashMap::new()));
+
                     // Start audio engine
                     let (audio, streams) = match audio::start_audio(in_idx, out_idx) {
                         Ok((state, input_stream, output_stream)) => {
                             let audio_clone = state.clone();
+                            let jitter_clone = jitter.clone();
+                            let volumes_clone = user_volumes.clone();
                             let voice_addr_str = format!(
                                 "{}:{}",
                                 server_addr.split(':').next().unwrap_or("127.0.0.1"),
@@ -193,7 +207,7 @@ impl eframe::App for App {
                             );
                             self.runtime.spawn(async move {
                                 if let Ok(addr) = voice_addr_str.parse() {
-                                    crate::voice::run(audio_clone, addr, room_id, user_id).await;
+                                    crate::voice::run(audio_clone, addr, room_id, user_id, jitter_clone, volumes_clone).await;
                                 }
                             });
                             (Some(state), Some((input_stream, output_stream)))
@@ -230,6 +244,9 @@ impl eframe::App for App {
                         ptt_key,
                         ptt_key_idx: 0, // "V" is index 0 in key_names()
                         use_open_mic: true, // default: open mic
+                        user_volumes,
+                        user_id_map: HashMap::new(),
+                        our_user_id: user_id,
                     };
                 }
                 ConnectResult::Err(msg) => {
@@ -370,6 +387,9 @@ impl eframe::App for App {
                 ptt_key,
                 ptt_key_idx,
                 use_open_mic,
+                user_volumes,
+                user_id_map: _user_id_map,
+                our_user_id: _our_user_id,
                 ..
             } => {
                 // Poll incoming messages
