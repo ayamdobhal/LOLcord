@@ -1,2 +1,4 @@
 target/
-.DS_Store
+*.zip
+LOLcord-windows.zip
+
