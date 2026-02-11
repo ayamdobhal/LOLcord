@@ -888,6 +888,22 @@ impl eframe::App for App {
 
                                 let is_vad = audio.vad_active.load(Ordering::Relaxed);
 
+                                // Mute/Deafen buttons (FIRST in bottom_up = appears at very bottom)
+                                ui.horizontal(|ui| {
+                                    let mute_icon = if is_muted { mic_off_tid } else { mic_on_tid };
+                                    let mute_img = egui::ImageButton::new(egui::load::SizedTexture::new(mute_icon, egui::vec2(24.0, 24.0)));
+                                    if ui.add(mute_img).on_hover_text(if is_muted { "Unmute" } else { "Mute" }).clicked() {
+                                        audio.muted.store(!is_muted, Ordering::Relaxed);
+                                    }
+                                    let deaf_icon = if is_deaf { deaf_on_tid } else { deaf_off_tid };
+                                    let deaf_img = egui::ImageButton::new(egui::load::SizedTexture::new(deaf_icon, egui::vec2(24.0, 24.0)));
+                                    if ui.add(deaf_img).on_hover_text(if is_deaf { "Undeafen" } else { "Deafen" }).clicked() {
+                                        audio.deafened.store(!is_deaf, Ordering::Relaxed);
+                                    }
+                                });
+
+                                ui.separator();
+
                                 // Transmit indicator
                                 if is_open && is_vad && !is_muted && !is_deaf {
                                     ui.colored_label(
@@ -990,18 +1006,6 @@ impl eframe::App for App {
                                     });
                                 }
 
-                                ui.horizontal(|ui| {
-                                    let mute_icon = if is_muted { mic_off_tid } else { mic_on_tid };
-                                    let mute_img = egui::ImageButton::new(egui::load::SizedTexture::new(mute_icon, egui::vec2(24.0, 24.0)));
-                                    if ui.add(mute_img).on_hover_text(if is_muted { "Unmute" } else { "Mute" }).clicked() {
-                                        audio.muted.store(!is_muted, Ordering::Relaxed);
-                                    }
-                                    let deaf_icon = if is_deaf { deaf_on_tid } else { deaf_off_tid };
-                                    let deaf_img = egui::ImageButton::new(egui::load::SizedTexture::new(deaf_icon, egui::vec2(24.0, 24.0)));
-                                    if ui.add(deaf_img).on_hover_text(if is_deaf { "Undeafen" } else { "Deafen" }).clicked() {
-                                        audio.deafened.store(!is_deaf, Ordering::Relaxed);
-                                    }
-                                });
                             } else {
                                 ui.colored_label(egui::Color32::YELLOW, "! No audio");
                             }
