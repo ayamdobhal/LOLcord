@@ -604,6 +604,12 @@ impl eframe::App for App {
 
                                 ui.separator();
 
+                                // Noise suppression toggle
+                                let ns_on = audio.noise_suppression.load(Ordering::Relaxed);
+                                if ui.selectable_label(ns_on, "🔇 Noise Suppression").clicked() {
+                                    audio.noise_suppression.store(!ns_on, Ordering::Relaxed);
+                                }
+
                                 if ui.selectable_label(is_muted, "🔇 Mute").clicked() {
                                     audio.muted.store(!is_muted, Ordering::Relaxed);
                                 }

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use nnnoiseless::DenoiseState;
 use audiopus::{
     coder::{Decoder, Encoder},
     packet::Packet,
@@ -23,6 +24,10 @@ pub struct AudioState {
     pub deafened: AtomicBool,
     /// If true, transmit always (no PTT needed). If false, PTT mode.
     pub open_mic: AtomicBool,
+    /// Whether noise suppression is enabled.
+    pub noise_suppression: AtomicBool,
+    /// RNNoise denoiser state (expects 480-sample chunks).
+    denoiser: Mutex<Box<DenoiseState<'static>>>,
     /// Whether VAD detected voice (for UI indicator).
     pub vad_active: AtomicBool,
     /// VAD threshold (RMS). Range ~0.001 to 0.1. Stored as u32 (value * 10000).
@@ -60,6 +65,27 @@ impl AudioState {
         if got < voice::FRAME_SIZE {
             self.vad_active.store(false, Ordering::Relaxed);
             return None;
+        }
+
+        // Noise suppression (RNNoise): process in 480-sample chunks
+        if self.noise_suppression.load(Ordering::Relaxed) {
+            if let Ok(mut denoiser) = self.denoiser.lock() {
+                // RNNoise expects 480-sample frames; our frame is 960 samples
+                for chunk in pcm.chunks_mut(DenoiseState::FRAME_SIZE) {
+                    if chunk.len() == DenoiseState::FRAME_SIZE {
+                        let mut buf = [0.0f32; 480];
+                        // RNNoise works with values in [-32768, 32767] range
+                        for (i, s) in chunk.iter().enumerate() {
+                            buf[i] = *s * 32767.0;
+                        }
+                        let mut out = [0.0f32; 480];
+                        denoiser.process_frame(&mut out, &buf);
+                        for (i, s) in out.iter().enumerate() {
+                            chunk[i] = *s / 32767.0;
+                        }
+                    }
+                }
+            }
         }
 
         // VAD: compute RMS energy
@@ -292,6 +318,8 @@ pub fn start_audio(
         muted: AtomicBool::new(false),
         deafened: AtomicBool::new(false),
         open_mic: AtomicBool::new(true), // default: open mic
+        noise_suppression: AtomicBool::new(false), // default: off
+        denoiser: Mutex::new(DenoiseState::new()),
         vad_active: AtomicBool::new(false),
         vad_threshold: std::sync::atomic::AtomicU32::new(50), // 0.005 RMS default
         capture_cons: Mutex::new(capture_cons),
