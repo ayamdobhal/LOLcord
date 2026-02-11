@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use audiopus::{
     coder::Decoder,
     packet::Packet,
@@ -17,6 +18,13 @@ struct UserBuffer {
     primed: bool,
     /// Number of packets received before we start playing.
     buffered_count: usize,
+    /// Stats for connection quality
+    packets_received: u32,
+    packets_expected: u32,
+    /// Highest sequence number seen
+    max_seq_seen: u16,
+    /// Whether we've seen any packet yet
+    first_packet_seen: bool,
 }
 
 impl UserBuffer {
@@ -28,6 +36,10 @@ impl UserBuffer {
             play_seq: 0,
             primed: false,
             buffered_count: 0,
+            packets_received: 0,
+            packets_expected: 0,
+            max_seq_seen: 0,
+            first_packet_seen: false,
         }
     }
 
@@ -39,6 +51,23 @@ impl UserBuffer {
             }
             self.buffered_count += 1;
         }
+
+        // Track stats for connection quality
+        self.packets_received += 1;
+        if !self.first_packet_seen {
+            self.max_seq_seen = seq;
+            self.first_packet_seen = true;
+        } else {
+            // Count expected packets based on seq gap
+            let gap = seq.wrapping_sub(self.max_seq_seen);
+            if gap > 0 && gap < 1000 {
+                self.packets_expected += gap as u32;
+            }
+            if seq.wrapping_sub(self.max_seq_seen) < 32768 {
+                self.max_seq_seen = seq;
+            }
+        }
+
         self.packets.insert(seq, opus_data);
         // Cap buffer size to prevent unbounded growth
         while self.packets.len() > 20 {
@@ -153,5 +182,28 @@ impl JitterBuffer {
     /// Get the set of currently active user IDs.
     pub fn active_users(&self) -> Vec<u16> {
         self.users.keys().copied().collect()
+    }
+
+    /// Get packet loss percentage per user. Returns (user_id, loss_percent).
+    pub fn get_quality_stats(&self) -> HashMap<u16, f32> {
+        let mut stats = HashMap::new();
+        for (&uid, buf) in &self.users {
+            if buf.packets_expected > 0 {
+                let lost = buf.packets_expected.saturating_sub(buf.packets_received);
+                let loss_pct = (lost as f32 / buf.packets_expected as f32) * 100.0;
+                stats.insert(uid, loss_pct);
+            } else {
+                stats.insert(uid, 0.0);
+            }
+        }
+        stats
+    }
+
+    /// Reset quality stats (call periodically to get recent stats).
+    pub fn reset_quality_stats(&mut self) {
+        for buf in self.users.values_mut() {
+            buf.packets_received = 0;
+            buf.packets_expected = 0;
+        }
     }
 }

@@ -1,6 +1,8 @@
+mod config;
 mod room;
 
 use anyhow::Result;
+use config::ServerConfig;
 use room::RoomManager;
 use shared::{ClientMessage, ServerMessage, protocol, voice};
 use std::sync::Arc;
@@ -18,24 +20,21 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let port = std::env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(shared::DEFAULT_PORT);
-    let voice_port = std::env::var("VOICE_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(shared::DEFAULT_VOICE_PORT);
+    let cfg = ServerConfig::load();
+    cfg.log();
 
-    let rooms = Arc::new(RoomManager::new());
+    let port = cfg.tcp_port;
+    let voice_port = cfg.udp_port;
+
+    let rooms = Arc::new(RoomManager::new(cfg.max_users_per_room, cfg.max_rooms));
 
     // TCP signaling
-    let tcp_listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    info!("TCP signaling on 0.0.0.0:{port}");
+    let tcp_listener = TcpListener::bind(format!("{}:{port}", cfg.bind_addr)).await?;
+    info!("TCP signaling on {}:{port}", cfg.bind_addr);
 
     // UDP voice relay
-    let udp_socket = Arc::new(UdpSocket::bind(format!("0.0.0.0:{voice_port}")).await?);
-    info!("UDP voice relay on 0.0.0.0:{voice_port}");
+    let udp_socket = Arc::new(UdpSocket::bind(format!("{}:{voice_port}", cfg.bind_addr)).await?);
+    info!("UDP voice relay on {}:{voice_port}", cfg.bind_addr);
 
     // Spawn UDP voice relay task
     let rooms_voice = rooms.clone();

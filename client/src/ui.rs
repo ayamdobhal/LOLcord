@@ -117,6 +117,12 @@ enum Screen {
         user_id_map: HashMap<String, u16>,
         /// Our own user_id
         our_user_id: u16,
+        /// Jitter buffer (shared with voice thread) for quality stats
+        jitter: Arc<Mutex<JitterBuffer>>,
+        /// Cached per-user quality stats
+        quality_stats: HashMap<u16, f32>,
+        /// Last time quality stats were updated
+        quality_update: std::time::Instant,
         /// E2E encryption key (derived from room password, if set)
         encryption_key: Option<[u8; 32]>,
         /// Original connection params for reconnect
@@ -382,6 +388,9 @@ impl eframe::App for App {
                         encryption_key,
                         connect_params: Some(rp),
                         reconnect_state: ReconnectState::Connected,
+                        jitter: jitter.clone(),
+                        quality_stats: HashMap::new(),
+                        quality_update: std::time::Instant::now(),
                     };
                 }
                 ConnectResult::Err(msg) => {
@@ -533,6 +542,9 @@ impl eframe::App for App {
                 encryption_key,
                 reconnect_state,
                 connect_params,
+                jitter,
+                quality_stats,
+                quality_update,
                 ..
             } => {
                 // Poll incoming messages + detect disconnection
@@ -635,6 +647,15 @@ impl eframe::App for App {
                     audio.open_mic.store(*use_open_mic, Ordering::Relaxed);
                 }
 
+                // Update connection quality stats every 3 seconds
+                if quality_update.elapsed() >= std::time::Duration::from_secs(3) {
+                    if let Ok(mut jb) = jitter.lock() {
+                        *quality_stats = jb.get_quality_stats();
+                        jb.reset_quality_stats();
+                    }
+                    *quality_update = std::time::Instant::now();
+                }
+
                 // Request repaint for live indicators (VAD, PTT)
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
@@ -648,7 +669,15 @@ impl eframe::App for App {
                             if user == username.as_str() {
                                 ui.label(format!("🎤 {user} (you)"));
                             } else {
-                                ui.label(format!("🔊 {user}"));
+                                let quality_icon = user_id_map.get(user)
+                                    .and_then(|uid| quality_stats.get(uid))
+                                    .map(|&loss| {
+                                        if loss < 2.0 { "🟢" }
+                                        else if loss < 10.0 { "🟡" }
+                                        else { "🔴" }
+                                    })
+                                    .unwrap_or("🔊");
+                                ui.label(format!("{quality_icon} {user}"));
                                 // Per-user volume slider
                                 if let Some(&uid) = user_id_map.get(user) {
                                     let mut vol = user_volumes

@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use shared::{ServerMessage, MAX_ROOM_USERS};
+use shared::ServerMessage;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -34,12 +34,16 @@ impl Room {
 
 pub struct RoomManager {
     rooms: RwLock<HashMap<String, Room>>,
+    max_users_per_room: usize,
+    max_rooms: usize,
 }
 
 impl RoomManager {
-    pub fn new() -> Self {
+    pub fn new(max_users_per_room: usize, max_rooms: usize) -> Self {
         Self {
             rooms: RwLock::new(HashMap::new()),
+            max_users_per_room,
+            max_rooms,
         }
     }
 
@@ -51,6 +55,12 @@ impl RoomManager {
         password: Option<&str>,
     ) -> Result<(Vec<String>, u16, u16, HashMap<String, u16>)> {
         let mut rooms = self.rooms.write().await;
+
+        // Check max rooms before creating a new one
+        if !rooms.contains_key(room_name) && rooms.len() >= self.max_rooms {
+            bail!("server room limit reached (max {})", self.max_rooms);
+        }
+
         let room = rooms
             .entry(room_name.to_string())
             .or_insert_with(|| {
@@ -65,8 +75,8 @@ impl RoomManager {
             }
         }
 
-        if room.members.len() >= MAX_ROOM_USERS {
-            bail!("room is full (max {MAX_ROOM_USERS})");
+        if room.members.len() >= self.max_users_per_room {
+            bail!("room is full (max {})", self.max_users_per_room);
         }
 
         if room.members.contains_key(username) {
