@@ -77,6 +77,12 @@ pub struct App {
     tray_state: Option<crate::tray::TrayState>,
     /// Logo texture for login screen
     logo_texture: Option<egui::TextureHandle>,
+    /// Icon textures for mute/deafen/send buttons
+    mic_on_texture: Option<egui::TextureHandle>,
+    mic_off_texture: Option<egui::TextureHandle>,
+    deaf_off_texture: Option<egui::TextureHandle>,
+    deaf_on_texture: Option<egui::TextureHandle>,
+    send_texture: Option<egui::TextureHandle>,
     /// Persisted settings
     settings: Settings,
 }
@@ -188,6 +194,11 @@ impl App {
             deferred_reconnect: None,
             deferred_go_login: None,
             logo_texture: None,
+            mic_on_texture: None,
+            mic_off_texture: None,
+            deaf_off_texture: None,
+            deaf_on_texture: None,
+            send_texture: None,
             settings,
         }
     }
@@ -203,6 +214,17 @@ impl App {
             let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
             ctx.load_texture("logo", color_image, egui::TextureOptions::LINEAR)
         })
+    }
+
+    fn load_icon(texture: &mut Option<egui::TextureHandle>, ctx: &egui::Context, name: &str, bytes: &[u8]) -> egui::TextureId {
+        texture.get_or_insert_with(|| {
+            let img = image::load_from_memory(bytes).expect("failed to load icon");
+            let rgba = img.into_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let pixels = rgba.into_raw();
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+            ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR)
+        }).id()
     }
 
     fn initiate_connect(&self, ctx: &egui::Context, addr: String, username: String, room: String, password: String, raw_password: Option<String>, is_reconnect: bool) {
@@ -520,6 +542,13 @@ impl eframe::App for App {
 
         // Pre-load logo texture to avoid borrow conflicts
         let logo_tid = self.get_logo_texture(ctx).id();
+
+        // Pre-load icon textures
+        let mic_on_tid = Self::load_icon(&mut self.mic_on_texture, ctx, "mic_on", include_bytes!("../assets/mic_on.png"));
+        let mic_off_tid = Self::load_icon(&mut self.mic_off_texture, ctx, "mic_off", include_bytes!("../assets/mic_off.png"));
+        let deaf_off_tid = Self::load_icon(&mut self.deaf_off_texture, ctx, "deaf_off", include_bytes!("../assets/deaf_off.png"));
+        let deaf_on_tid = Self::load_icon(&mut self.deaf_on_texture, ctx, "deaf_on", include_bytes!("../assets/deaf_on.png"));
+        let send_tid = Self::load_icon(&mut self.send_texture, ctx, "send", include_bytes!("../assets/send.png"));
 
         match &mut self.state {
             Screen::Login {
@@ -936,14 +965,14 @@ impl eframe::App for App {
                                     });
                                 }
 
-                                let mute_text = if is_muted { "MIC OFF" } else { "MIC" };
-                                let mute_color = if is_muted { egui::Color32::RED } else { ui.visuals().text_color() };
-                                if ui.add(egui::Button::new(egui::RichText::new(mute_text).color(mute_color))).clicked() {
+                                let mute_icon = if is_muted { mic_off_tid } else { mic_on_tid };
+                                let mute_img = egui::ImageButton::new(egui::load::SizedTexture::new(mute_icon, egui::vec2(24.0, 24.0)));
+                                if ui.add(mute_img).on_hover_text(if is_muted { "Unmute" } else { "Mute" }).clicked() {
                                     audio.muted.store(!is_muted, Ordering::Relaxed);
                                 }
-                                let deaf_text = if is_deaf { "DEAF" } else { "SOUND" };
-                                let deaf_color = if is_deaf { egui::Color32::RED } else { ui.visuals().text_color() };
-                                if ui.add(egui::Button::new(egui::RichText::new(deaf_text).color(deaf_color))).clicked() {
+                                let deaf_icon = if is_deaf { deaf_on_tid } else { deaf_off_tid };
+                                let deaf_img = egui::ImageButton::new(egui::load::SizedTexture::new(deaf_icon, egui::vec2(24.0, 24.0)));
+                                if ui.add(deaf_img).on_hover_text(if is_deaf { "Undeafen" } else { "Deafen" }).clicked() {
                                     audio.deafened.store(!is_deaf, Ordering::Relaxed);
                                 }
                             } else {
@@ -1009,7 +1038,8 @@ impl eframe::App for App {
 
                             let enter_pressed = response.lost_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            let send = ui.button("→").clicked() || enter_pressed;
+                            let send_img = egui::ImageButton::new(egui::load::SizedTexture::new(send_tid, egui::vec2(20.0, 20.0)));
+                            let send = ui.add(send_img).on_hover_text("Send").clicked() || enter_pressed;
 
                             if send && !input.trim().is_empty() {
                                 let text = input.trim().to_string();
