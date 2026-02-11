@@ -1,7 +1,7 @@
 use egui;
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    Icon, TrayIcon, TrayIconBuilder,
+    Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 
 pub enum TrayCommand {
@@ -59,6 +59,28 @@ pub fn create_tray() -> Option<TrayState> {
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let ctx_ref = egui_ctx.clone();
 
+    // Tray icon double-click listener
+    let click_tx = tx.clone();
+    let click_ctx = egui_ctx.clone();
+    std::thread::Builder::new()
+        .name("tray-click".into())
+        .spawn(move || {
+            loop {
+                if let Ok(event) = TrayIconEvent::receiver().recv() {
+                    if matches!(event, TrayIconEvent::DoubleClick { .. }) {
+                        let _ = click_tx.send(TrayCommand::Show);
+                        if let Ok(guard) = click_ctx.lock() {
+                            if let Some(ref ctx) = *guard {
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .ok()?;
+
+    // Menu event listener
     std::thread::Builder::new()
         .name("tray-events".into())
         .spawn(move || {
