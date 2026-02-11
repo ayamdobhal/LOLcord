@@ -32,6 +32,10 @@ pub struct AudioState {
     pub vad_active: AtomicBool,
     /// VAD threshold (RMS). Range ~0.001 to 0.1. Stored as u32 (value * 10000).
     pub vad_threshold: std::sync::atomic::AtomicU32,
+    /// Noise gate enabled.
+    pub noise_gate_enabled: AtomicBool,
+    /// Noise gate threshold (RMS * 10000). Below this, audio is faded to zero.
+    pub noise_gate_threshold: std::sync::atomic::AtomicU32,
     capture_cons: Mutex<ringbuf::HeapCons<f32>>,
     playback_prod: Mutex<ringbuf::HeapProd<f32>>,
     encoder: Mutex<Encoder>,
@@ -83,6 +87,27 @@ impl AudioState {
                         for (i, s) in out.iter().enumerate() {
                             chunk[i] = *s / 32767.0;
                         }
+                    }
+                }
+            }
+        }
+
+        // Noise gate: zero out audio below energy threshold with soft fade
+        if self.noise_gate_enabled.load(Ordering::Relaxed) {
+            let gate_thresh = self.noise_gate_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
+            let rms_energy = {
+                let sum_sq: f32 = pcm.iter().map(|&s| s * s).sum();
+                (sum_sq / pcm.len() as f32).sqrt()
+            };
+            if rms_energy < gate_thresh {
+                // Soft fade out over first 64 samples to avoid clicks
+                let fade_len = 64.min(pcm.len());
+                for (i, s) in pcm.iter_mut().enumerate() {
+                    if i < fade_len {
+                        let fade = 1.0 - (i as f32 / fade_len as f32);
+                        *s *= fade;
+                    } else {
+                        *s = 0.0;
                     }
                 }
             }
@@ -322,6 +347,8 @@ pub fn start_audio(
         denoiser: Mutex::new(DenoiseState::new()),
         vad_active: AtomicBool::new(false),
         vad_threshold: std::sync::atomic::AtomicU32::new(50), // 0.005 RMS default
+        noise_gate_enabled: AtomicBool::new(false),
+        noise_gate_threshold: std::sync::atomic::AtomicU32::new(30), // 0.003 RMS default
         capture_cons: Mutex::new(capture_cons),
         playback_prod: Mutex::new(playback_prod),
         encoder: Mutex::new(encoder),

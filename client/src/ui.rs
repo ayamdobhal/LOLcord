@@ -606,8 +606,24 @@ impl eframe::App for App {
 
                                 // Noise suppression toggle
                                 let ns_on = audio.noise_suppression.load(Ordering::Relaxed);
-                                if ui.selectable_label(ns_on, "🔇 Noise Suppression").clicked() {
+                                if ui.selectable_label(ns_on, "🔉 Noise Suppression").clicked() {
                                     audio.noise_suppression.store(!ns_on, Ordering::Relaxed);
+                                }
+
+                                // Noise gate toggle + threshold slider
+                                let ng_on = audio.noise_gate_enabled.load(Ordering::Relaxed);
+                                if ui.selectable_label(ng_on, "🚪 Noise Gate").clicked() {
+                                    audio.noise_gate_enabled.store(!ng_on, Ordering::Relaxed);
+                                }
+                                if ng_on {
+                                    let mut thresh = audio.noise_gate_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().slider_width = 80.0;
+                                        ui.label("Gate:");
+                                        if ui.add(egui::Slider::new(&mut thresh, 0.001..=0.05).show_value(false)).changed() {
+                                            audio.noise_gate_threshold.store((thresh * 10000.0) as u32, Ordering::Relaxed);
+                                        }
+                                    });
                                 }
 
                                 if ui.selectable_label(is_muted, "🔇 Mute").clicked() {
