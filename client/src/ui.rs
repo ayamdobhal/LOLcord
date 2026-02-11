@@ -893,6 +893,7 @@ impl eframe::App for App {
                                 let is_vad = audio.vad_active.load(Ordering::Relaxed);
 
                                 // Mute/Deafen buttons (FIRST in bottom_up = appears at very bottom)
+                                ui.add_space(4.0);
                                 ui.horizontal(|ui| {
                                     let mute_icon = if is_muted { mic_off_tid } else { mic_on_tid };
                                     let mute_img = egui::ImageButton::new(egui::load::SizedTexture::new(mute_icon, egui::vec2(24.0, 24.0)));
