@@ -138,7 +138,11 @@ impl eframe::App for App {
         // Check for connection results
         if let Ok(result) = self.connect_rx.try_recv() {
             match result {
-                ConnectResult::Ok { room, username, users, client_tx, bridge_rx } => {
+                ConnectResult::Ok { room, username, mut users, client_tx, bridge_rx } => {
+                    // Add ourselves to the user list
+                    if !users.contains(&username) {
+                        users.push(username.clone());
+                    }
                     self.state = Screen::Connected {
                         room,
                         username,
