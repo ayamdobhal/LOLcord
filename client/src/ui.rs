@@ -38,6 +38,8 @@ enum Screen {
         password: String,
         error: Option<String>,
         connecting: bool,
+        /// Set to true once connect has been dispatched, prevents double-fire
+        dispatched: bool,
     },
     Connected {
         room: String,
@@ -68,6 +70,7 @@ impl App {
                 password: String::new(),
                 error: None,
                 connecting: false,
+                dispatched: false,
             },
             runtime,
             connect_rx,
@@ -147,9 +150,10 @@ impl eframe::App for App {
                     };
                 }
                 ConnectResult::Err(msg) => {
-                    if let Screen::Login { error, connecting, .. } = &mut self.state {
+                    if let Screen::Login { error, connecting, dispatched, .. } = &mut self.state {
                         *error = Some(msg);
                         *connecting = false;
+                        *dispatched = false;
                     }
                 }
             }
@@ -163,6 +167,7 @@ impl eframe::App for App {
                 password,
                 error,
                 connecting,
+                ..
             } => {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
@@ -216,14 +221,17 @@ impl eframe::App for App {
                     });
                 });
 
-                // Trigger connect outside the borrow
-                if let Screen::Login { connecting: true, server_addr, username, room, password, error, .. } = &self.state {
+                // Trigger connect outside the borrow (only once)
+                if let Screen::Login { connecting: true, dispatched: false, server_addr, username, room, password, error, .. } = &self.state {
                     if error.is_none() {
                         let addr = server_addr.clone();
                         let user = username.trim().to_string();
                         let rm = room.trim().to_string();
                         let pw = password.clone();
                         self.initiate_connect(ctx, addr, user, rm, pw);
+                        if let Screen::Login { dispatched, .. } = &mut self.state {
+                            *dispatched = true;
+                        }
                     }
                 }
             }
