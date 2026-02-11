@@ -338,9 +338,12 @@ impl eframe::App for App {
         // Minimize to tray on close (if tray is available, regardless of screen)
         if self.tray_state.is_some() {
             if ctx.input(|i| i.viewport().close_requested()) {
+                // Cancel the close, hide window to tray
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                // On Windows, Visible(false) may not work — use outer_position to move offscreen
+                // then minimize as fallback
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(-10000.0, -10000.0)));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
         }
 
@@ -349,8 +352,9 @@ impl eframe::App for App {
             while let Ok(cmd) = tray_state.rx.try_recv() {
                 match cmd {
                     crate::tray::TrayCommand::Show => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(100.0, 100.0)));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                     crate::tray::TrayCommand::ToggleMute => {
