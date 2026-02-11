@@ -300,6 +300,15 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Give tray thread a handle to wake us up
+        if let Some(ref tray_state) = self.tray_state {
+            if let Ok(mut guard) = tray_state.egui_ctx.lock() {
+                if guard.is_none() {
+                    *guard = Some(ctx.clone());
+                }
+            }
+        }
+
         // Minimize to tray on close (if tray is available and connected)
         if self.tray_state.is_some() {
             if let Screen::Connected { .. } = &self.state {

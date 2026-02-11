@@ -1,3 +1,4 @@
+use egui;
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     Icon, TrayIcon, TrayIconBuilder,
@@ -15,6 +16,8 @@ pub struct TrayState {
     pub rx: std::sync::mpsc::Receiver<TrayCommand>,
     pub mute_item: CheckMenuItem,
     pub deafen_item: CheckMenuItem,
+    /// Set this to the egui Context so tray events can wake the UI loop
+    pub egui_ctx: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>>,
 }
 
 /// Create a tray icon with menu. Returns TrayState with handles to update menu items.
@@ -52,6 +55,9 @@ pub fn create_tray() -> Option<TrayState> {
         .ok()?;
 
     let (tx, rx) = std::sync::mpsc::channel();
+    let egui_ctx: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let ctx_ref = egui_ctx.clone();
 
     std::thread::Builder::new()
         .name("tray-events".into())
@@ -72,6 +78,12 @@ pub fn create_tray() -> Option<TrayState> {
                     if tx.send(cmd).is_err() {
                         break;
                     }
+                    // Wake the UI event loop immediately
+                    if let Ok(guard) = ctx_ref.lock() {
+                        if let Some(ref ctx) = *guard {
+                            ctx.request_repaint();
+                        }
+                    }
                 }
             }
         })
@@ -82,5 +94,6 @@ pub fn create_tray() -> Option<TrayState> {
         rx,
         mute_item,
         deafen_item,
+        egui_ctx,
     })
 }
