@@ -913,6 +913,7 @@ dependencies = [
  "device_query",
  "eframe",
  "egui",
+ "image",
  "nnnoiseless",
  "rand",
  "ringbuf",

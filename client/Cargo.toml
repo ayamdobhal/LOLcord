@@ -23,3 +23,4 @@ chacha20poly1305 = "0.10"
 argon2 = "0.5"
 rand = "0.8"
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }

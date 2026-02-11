@@ -77,6 +77,8 @@ pub struct App {
     _tray: Option<tray_icon::TrayIcon>,
     /// Tray command receiver
     tray_rx: Option<std_mpsc::Receiver<crate::tray::TrayCommand>>,
+    /// Logo texture for login screen
+    logo_texture: Option<egui::TextureHandle>,
 }
 
 enum Screen {
@@ -177,7 +179,20 @@ impl App {
             reconnect_pending: false,
             deferred_reconnect: None,
             deferred_go_login: None,
+            logo_texture: None,
         }
+    }
+
+    fn get_logo_texture(&mut self, ctx: &egui::Context) -> &egui::TextureHandle {
+        self.logo_texture.get_or_insert_with(|| {
+            let bytes = include_bytes!("../assets/logo.png");
+            let img = image::load_from_memory(bytes).expect("failed to load logo");
+            let rgba = img.into_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let pixels = rgba.into_raw();
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+            ctx.load_texture("logo", color_image, egui::TextureOptions::LINEAR)
+        })
     }
 
     fn initiate_connect(&self, ctx: &egui::Context, addr: String, username: String, room: String, password: String, raw_password: Option<String>, is_reconnect: bool) {
@@ -415,6 +430,9 @@ impl eframe::App for App {
             }
         }
 
+        // Pre-load logo texture to avoid borrow conflicts
+        let logo_tid = self.get_logo_texture(ctx).id();
+
         match &mut self.state {
             Screen::Login {
                 server_addr,
@@ -431,9 +449,10 @@ impl eframe::App for App {
             } => {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.add_space(30.0);
-                        ui.heading("voicechat");
-                        ui.add_space(16.0);
+                        ui.add_space(10.0);
+                        let logo_size = egui::vec2(120.0, 120.0);
+                        ui.image(egui::load::SizedTexture::new(logo_tid, logo_size));
+                        ui.add_space(8.0);
 
                         ui.set_max_width(350.0);
 

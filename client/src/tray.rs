@@ -37,30 +37,17 @@ pub fn create_tray() -> Option<(TrayIcon, std::sync::mpsc::Receiver<TrayCommand>
     menu.append(&PredefinedMenuItem::separator()).ok()?;
     menu.append(&quit_item).ok()?;
 
-    // Create a simple 16x16 RGBA icon (green circle)
-    let size = 16u32;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
-    let center = size as f32 / 2.0;
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - center + 0.5;
-            let dy = y as f32 - center + 0.5;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let idx = ((y * size + x) * 4) as usize;
-            if dist < center - 1.0 {
-                rgba[idx] = 80;     // R
-                rgba[idx + 1] = 200; // G
-                rgba[idx + 2] = 80;  // B
-                rgba[idx + 3] = 255; // A
-            }
-        }
-    }
-
-    let icon = Icon::from_rgba(rgba, size, size).ok()?;
+    // Load icon from embedded PNG
+    let icon = {
+        let bytes = include_bytes!("../assets/icon.png");
+        let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+        let (w, h) = img.dimensions();
+        Icon::from_rgba(img.into_raw(), w, h).ok()?
+    };
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("voicechat")
+        .with_tooltip("LOLcord")
         .with_icon(icon)
         .build()
         .ok()?;
