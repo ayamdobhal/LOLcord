@@ -1,4 +1,5 @@
 use crate::audio::{self, AudioState};
+use crate::devices::{self, DeviceInfo};
 use crate::net::Connection;
 use eframe::egui;
 use shared::{ClientMessage, ServerMessage};
@@ -34,9 +35,10 @@ enum ConnectResult {
 pub struct App {
     state: Screen,
     runtime: tokio::runtime::Runtime,
-    /// Receives connection results from async tasks
     connect_rx: std_mpsc::Receiver<ConnectResult>,
     connect_tx: std_mpsc::Sender<ConnectResult>,
+    /// Stash selected device indices before async connect
+    pending_devices: Option<(Option<usize>, Option<usize>)>,
 }
 
 enum Screen {
@@ -47,8 +49,11 @@ enum Screen {
         password: String,
         error: Option<String>,
         connecting: bool,
-        /// Set to true once connect has been dispatched, prevents double-fire
         dispatched: bool,
+        input_devices: Vec<DeviceInfo>,
+        output_devices: Vec<DeviceInfo>,
+        selected_input: usize,
+        selected_output: usize,
     },
     Connected {
         room: String,
@@ -74,6 +79,9 @@ impl App {
 
         let (connect_tx, connect_rx) = std_mpsc::channel();
 
+        let input_devices = devices::list_input_devices();
+        let output_devices = devices::list_output_devices();
+
         Self {
             state: Screen::Login {
                 server_addr: format!("127.0.0.1:{}", shared::DEFAULT_PORT),
@@ -83,10 +91,15 @@ impl App {
                 error: None,
                 connecting: false,
                 dispatched: false,
+                input_devices,
+                output_devices,
+                selected_input: 0,
+                selected_output: 0,
             },
             runtime,
             connect_rx,
             connect_tx,
+            pending_devices: None,
         }
     }
 
@@ -157,8 +170,11 @@ impl eframe::App for App {
                         users.push(username.clone());
                     }
 
+                    // Get selected devices from login state (saved before transition)
+                    let (in_idx, out_idx) = self.pending_devices.take().unwrap_or((None, None));
+
                     // Start audio engine
-                    let (audio, streams) = match audio::start_audio() {
+                    let (audio, streams) = match audio::start_audio(in_idx, out_idx) {
                         Ok((state, input_stream, output_stream)) => {
                             let audio_clone = state.clone();
                             let voice_addr_str = format!(
@@ -210,15 +226,19 @@ impl eframe::App for App {
                 password,
                 error,
                 connecting,
+                input_devices,
+                output_devices,
+                selected_input,
+                selected_output,
                 ..
             } => {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.add_space(40.0);
+                        ui.add_space(30.0);
                         ui.heading("voicechat");
-                        ui.add_space(20.0);
+                        ui.add_space(16.0);
 
-                        ui.set_max_width(300.0);
+                        ui.set_max_width(350.0);
 
                         egui::Grid::new("login_grid")
                             .num_columns(2)
@@ -238,6 +258,38 @@ impl eframe::App for App {
 
                                 ui.label("Password:");
                                 ui.add(egui::TextEdit::singleline(password).password(true));
+                                ui.end_row();
+
+                                ui.label("Microphone:");
+                                egui::ComboBox::from_id_salt("input_device")
+                                    .width(220.0)
+                                    .selected_text(
+                                        input_devices
+                                            .get(*selected_input)
+                                            .map(|d| d.name.as_str())
+                                            .unwrap_or("(none)"),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (i, dev) in input_devices.iter().enumerate() {
+                                            ui.selectable_value(selected_input, i, &dev.name);
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Speaker:");
+                                egui::ComboBox::from_id_salt("output_device")
+                                    .width(220.0)
+                                    .selected_text(
+                                        output_devices
+                                            .get(*selected_output)
+                                            .map(|d| d.name.as_str())
+                                            .unwrap_or("(none)"),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (i, dev) in output_devices.iter().enumerate() {
+                                            ui.selectable_value(selected_output, i, &dev.name);
+                                        }
+                                    });
                                 ui.end_row();
                             });
 
@@ -265,12 +317,16 @@ impl eframe::App for App {
                 });
 
                 // Trigger connect outside the borrow (only once)
-                if let Screen::Login { connecting: true, dispatched: false, server_addr, username, room, password, error, .. } = &self.state {
+                if let Screen::Login { connecting: true, dispatched: false, server_addr, username, room, password, error, selected_input, selected_output, input_devices, output_devices, .. } = &self.state {
                     if error.is_none() {
                         let addr = server_addr.clone();
                         let user = username.trim().to_string();
                         let rm = room.trim().to_string();
                         let pw = password.clone();
+                        // Stash device selections
+                        let in_idx = input_devices.get(*selected_input).map(|d| d.index);
+                        let out_idx = output_devices.get(*selected_output).map(|d| d.index);
+                        self.pending_devices = Some((in_idx, out_idx));
                         self.initiate_connect(ctx, addr, user, rm, pw);
                         if let Screen::Login { dispatched, .. } = &mut self.state {
                             *dispatched = true;

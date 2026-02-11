@@ -203,15 +203,26 @@ fn from_mono_48k(data: &[f32], channels: u16, sample_rate: u32) -> Vec<f32> {
 }
 
 /// Start audio I/O and return the shared AudioState + streams.
-pub fn start_audio() -> Result<(Arc<AudioState>, cpal::Stream, cpal::Stream)> {
+pub fn start_audio(
+    input_device_idx: Option<usize>,
+    output_device_idx: Option<usize>,
+) -> Result<(Arc<AudioState>, cpal::Stream, cpal::Stream)> {
     let host = cpal::default_host();
 
-    let input_device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow::anyhow!("no input device"))?;
-    let output_device = host
-        .default_output_device()
-        .ok_or_else(|| anyhow::anyhow!("no output device"))?;
+    let input_device = match input_device_idx {
+        Some(idx) => crate::devices::get_input_device(idx)
+            .ok_or_else(|| anyhow::anyhow!("input device {idx} not found"))?,
+        None => host
+            .default_input_device()
+            .ok_or_else(|| anyhow::anyhow!("no input device"))?,
+    };
+    let output_device = match output_device_idx {
+        Some(idx) => crate::devices::get_output_device(idx)
+            .ok_or_else(|| anyhow::anyhow!("output device {idx} not found"))?,
+        None => host
+            .default_output_device()
+            .ok_or_else(|| anyhow::anyhow!("no output device"))?,
+    };
 
     tracing::info!("input device: {}", input_device.name().unwrap_or_default());
     tracing::info!("output device: {}", output_device.name().unwrap_or_default());
