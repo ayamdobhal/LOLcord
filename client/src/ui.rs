@@ -73,10 +73,8 @@ pub struct App {
     deferred_reconnect: Option<ReconnectParams>,
     /// Deferred go-to-login
     deferred_go_login: Option<ReconnectParams>,
-    /// System tray icon (kept alive)
-    _tray: Option<tray_icon::TrayIcon>,
-    /// Tray command receiver
-    tray_rx: Option<std_mpsc::Receiver<crate::tray::TrayCommand>>,
+    /// System tray state (icon + menu item handles)
+    tray_state: Option<crate::tray::TrayState>,
     /// Logo texture for login screen
     logo_texture: Option<egui::TextureHandle>,
     /// Persisted settings
@@ -155,10 +153,7 @@ impl App {
         let input_devices = devices::list_input_devices();
         let output_devices = devices::list_output_devices();
 
-        let (tray, tray_rx) = match crate::tray::create_tray() {
-            Some((t, r)) => (Some(t), Some(r)),
-            None => (None, None),
-        };
+        let tray_state = crate::tray::create_tray();
 
         // Load persisted settings
         let settings = Settings::load();
@@ -188,8 +183,7 @@ impl App {
             connect_rx,
             connect_tx,
             pending_devices: None,
-            _tray: tray,
-            tray_rx,
+            tray_state,
             reconnect_pending: false,
             deferred_reconnect: None,
             deferred_go_login: None,
@@ -352,7 +346,7 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Minimize to tray on close (if tray is available and connected)
-        if self._tray.is_some() {
+        if self.tray_state.is_some() {
             if let Screen::Connected { .. } = &self.state {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -362,8 +356,8 @@ impl eframe::App for App {
         }
 
         // Handle tray commands
-        if let Some(ref tray_rx) = self.tray_rx {
-            while let Ok(cmd) = tray_rx.try_recv() {
+        if let Some(ref tray_state) = self.tray_state {
+            while let Ok(cmd) = tray_state.rx.try_recv() {
                 match cmd {
                     crate::tray::TrayCommand::Show => {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -373,7 +367,9 @@ impl eframe::App for App {
                         if let Screen::Connected { ref audio, .. } = self.state {
                             if let Some(ref a) = audio {
                                 let cur = a.muted.load(Ordering::Relaxed);
-                                a.muted.store(!cur, Ordering::Relaxed);
+                                let new_val = !cur;
+                                a.muted.store(new_val, Ordering::Relaxed);
+                                tray_state.mute_item.set_checked(new_val);
                             }
                         }
                     }
@@ -381,13 +377,23 @@ impl eframe::App for App {
                         if let Screen::Connected { ref audio, .. } = self.state {
                             if let Some(ref a) = audio {
                                 let cur = a.deafened.load(Ordering::Relaxed);
-                                a.deafened.store(!cur, Ordering::Relaxed);
+                                let new_val = !cur;
+                                a.deafened.store(new_val, Ordering::Relaxed);
+                                tray_state.deafen_item.set_checked(new_val);
                             }
                         }
                     }
                     crate::tray::TrayCommand::Quit => {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+                }
+            }
+
+            // Sync tray checkmarks with actual audio state (in case toggled from UI)
+            if let Screen::Connected { ref audio, .. } = self.state {
+                if let Some(ref a) = audio {
+                    tray_state.mute_item.set_checked(a.muted.load(Ordering::Relaxed));
+                    tray_state.deafen_item.set_checked(a.deafened.load(Ordering::Relaxed));
                 }
             }
         }

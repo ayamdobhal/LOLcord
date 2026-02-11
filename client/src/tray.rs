@@ -1,12 +1,6 @@
-use crate::audio::AudioState;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    TrayIcon, TrayIconBuilder,
-    Icon,
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    Icon, TrayIcon, TrayIconBuilder,
 };
 
 pub enum TrayCommand {
@@ -16,13 +10,19 @@ pub enum TrayCommand {
     Quit,
 }
 
-/// Create a basic tray icon. Returns the TrayIcon (must be kept alive) and a
-/// receiver for menu commands. Must be called from the main/UI thread.
-pub fn create_tray() -> Option<(TrayIcon, std::sync::mpsc::Receiver<TrayCommand>)> {
+pub struct TrayState {
+    pub tray: TrayIcon,
+    pub rx: std::sync::mpsc::Receiver<TrayCommand>,
+    pub mute_item: CheckMenuItem,
+    pub deafen_item: CheckMenuItem,
+}
+
+/// Create a tray icon with menu. Returns TrayState with handles to update menu items.
+pub fn create_tray() -> Option<TrayState> {
     let menu = Menu::new();
     let show_item = MenuItem::new("Show", true, None);
-    let mute_item = MenuItem::new("Mute", true, None);
-    let deafen_item = MenuItem::new("Deafen", true, None);
+    let mute_item = CheckMenuItem::new("Mute", true, false, None);
+    let deafen_item = CheckMenuItem::new("Deafen", true, false, None);
     let quit_item = MenuItem::new("Quit", true, None);
 
     let show_id = show_item.id().clone();
@@ -37,7 +37,6 @@ pub fn create_tray() -> Option<(TrayIcon, std::sync::mpsc::Receiver<TrayCommand>
     menu.append(&PredefinedMenuItem::separator()).ok()?;
     menu.append(&quit_item).ok()?;
 
-    // Load icon from embedded PNG
     let icon = {
         let bytes = include_bytes!("../assets/icon.png");
         let img = image::load_from_memory(bytes).ok()?.into_rgba8();
@@ -54,7 +53,6 @@ pub fn create_tray() -> Option<(TrayIcon, std::sync::mpsc::Receiver<TrayCommand>
 
     let (tx, rx) = std::sync::mpsc::channel();
 
-    // Spawn menu event listener thread
     std::thread::Builder::new()
         .name("tray-events".into())
         .spawn(move || {
@@ -79,5 +77,10 @@ pub fn create_tray() -> Option<(TrayIcon, std::sync::mpsc::Receiver<TrayCommand>
         })
         .ok()?;
 
-    Some((tray, rx))
+    Some(TrayState {
+        tray,
+        rx,
+        mute_item,
+        deafen_item,
+    })
 }
