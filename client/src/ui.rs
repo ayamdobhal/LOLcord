@@ -34,8 +34,30 @@ enum ConnectResult {
         bridge_rx: std_mpsc::Receiver<ServerMessage>,
         user_ids: HashMap<String, u16>,
         password: Option<String>,
+        is_reconnect: bool,
     },
     Err(String),
+}
+
+#[derive(Clone)]
+struct ReconnectParams {
+    server_addr: String,
+    username: String,
+    room: String,
+    password: String,
+    input_device_idx: Option<usize>,
+    output_device_idx: Option<usize>,
+}
+
+#[derive(Clone, PartialEq)]
+enum ReconnectState {
+    Connected,
+    Reconnecting {
+        attempt: u32,
+        next_try: std::time::Instant,
+        started: std::time::Instant,
+    },
+    GaveUp,
 }
 
 pub struct App {
@@ -45,6 +67,12 @@ pub struct App {
     connect_tx: std_mpsc::Sender<ConnectResult>,
     /// Stash selected device indices before async connect
     pending_devices: Option<(Option<usize>, Option<usize>)>,
+    /// Whether a reconnect attempt is in-flight
+    reconnect_pending: bool,
+    /// Deferred reconnect action (set in match, executed after)
+    deferred_reconnect: Option<ReconnectParams>,
+    /// Deferred go-to-login
+    deferred_go_login: Option<ReconnectParams>,
     /// System tray icon (kept alive)
     _tray: Option<tray_icon::TrayIcon>,
     /// Tray command receiver
@@ -91,6 +119,10 @@ enum Screen {
         our_user_id: u16,
         /// E2E encryption key (derived from room password, if set)
         encryption_key: Option<[u8; 32]>,
+        /// Original connection params for reconnect
+        connect_params: Option<ReconnectParams>,
+        /// Reconnection state
+        reconnect_state: ReconnectState,
     },
 }
 
@@ -132,10 +164,13 @@ impl App {
             pending_devices: None,
             _tray: tray,
             tray_rx,
+            reconnect_pending: false,
+            deferred_reconnect: None,
+            deferred_go_login: None,
         }
     }
 
-    fn initiate_connect(&self, ctx: &egui::Context, addr: String, username: String, room: String, password: String, raw_password: Option<String>) {
+    fn initiate_connect(&self, ctx: &egui::Context, addr: String, username: String, room: String, password: String, raw_password: Option<String>, is_reconnect: bool) {
         let join_msg = ClientMessage::Join {
             username: username.clone(),
             room: room.clone(),
@@ -175,6 +210,7 @@ impl App {
                                 bridge_rx,
                                 user_ids,
                                 password: raw_password,
+                                is_reconnect,
                             });
                         }
                         Some(ServerMessage::Error { message }) => {
@@ -240,7 +276,7 @@ impl eframe::App for App {
         // Check for connection results
         if let Ok(result) = self.connect_rx.try_recv() {
             match result {
-                ConnectResult::Ok { room, username, mut users, user_id, room_id, voice_port, server_addr, client_tx, bridge_rx, user_ids: initial_user_ids, password } => {
+                ConnectResult::Ok { room, username, mut users, user_id, room_id, voice_port, server_addr, client_tx, bridge_rx, user_ids: initial_user_ids, password, is_reconnect } => {
                     if !users.contains(&username) {
                         users.push(username.clone());
                     }
@@ -249,6 +285,21 @@ impl eframe::App for App {
                     let encryption_key = password.as_ref()
                         .filter(|p| !p.is_empty())
                         .map(|p| crate::crypto::derive_key(p));
+
+                    // Preserve messages from old state if reconnecting
+                    let old_messages = if is_reconnect {
+                        if let Screen::Connected { messages, .. } = &mut self.state {
+                            let mut msgs = Vec::new();
+                            std::mem::swap(&mut msgs, messages);
+                            msgs
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+
+                    self.reconnect_pending = false;
 
                     // Get selected devices from login state (saved before transition)
                     let (in_idx, out_idx) = self.pending_devices.take().unwrap_or((None, None));
@@ -293,11 +344,29 @@ impl eframe::App for App {
                         );
                     }
 
+                    // Build reconnect params
+                    let rp = ReconnectParams {
+                        server_addr: server_addr.clone(),
+                        username: username.clone(),
+                        room: room.clone(),
+                        password: password.as_ref().cloned().unwrap_or_default(),
+                        input_device_idx: in_idx,
+                        output_device_idx: out_idx,
+                    };
+
+                    let mut initial_messages = old_messages;
+                    if is_reconnect {
+                        initial_messages.push(ChatMsg {
+                            from: "system".into(),
+                            text: "Reconnected!".into(),
+                        });
+                    }
+
                     self.state = Screen::Connected {
                         room,
                         username,
                         users,
-                        messages: Vec::new(),
+                        messages: initial_messages,
                         input: String::new(),
                         client_tx,
                         bridge_rx,
@@ -311,10 +380,16 @@ impl eframe::App for App {
                         user_id_map: initial_user_ids,
                         our_user_id: user_id,
                         encryption_key,
+                        connect_params: Some(rp),
+                        reconnect_state: ReconnectState::Connected,
                     };
                 }
                 ConnectResult::Err(msg) => {
-                    if let Screen::Login { error, connecting, dispatched, .. } = &mut self.state {
+                    if self.reconnect_pending {
+                        // Reconnect attempt failed — will retry via state machine
+                        self.reconnect_pending = false;
+                        tracing::warn!("reconnect failed: {msg}");
+                    } else if let Screen::Login { error, connecting, dispatched, .. } = &mut self.state {
                         *error = Some(msg);
                         *connecting = false;
                         *dispatched = false;
@@ -433,7 +508,7 @@ impl eframe::App for App {
                         let out_idx = output_devices.get(*selected_output).and_then(|d| Some(d.index)).flatten();
                         self.pending_devices = Some((in_idx, out_idx));
                         let raw_pw = if pw.is_empty() { None } else { Some(pw.clone()) };
-                        self.initiate_connect(ctx, addr, user, rm, pw, raw_pw);
+                        self.initiate_connect(ctx, addr, user, rm, pw, raw_pw, false);
                         if let Screen::Login { dispatched, .. } = &mut self.state {
                             *dispatched = true;
                         }
@@ -456,51 +531,103 @@ impl eframe::App for App {
                 user_id_map,
                 our_user_id,
                 encryption_key,
+                reconnect_state,
+                connect_params,
                 ..
             } => {
-                // Poll incoming messages
-                while let Ok(msg) = bridge_rx.try_recv() {
-                    match msg {
-                        ServerMessage::Chat { from, text, .. } => {
-                            // Decrypt chat if encryption is active
-                            let text = if let Some(ref key) = encryption_key {
-                                // Try to decode base64 and decrypt
-                                use base64::Engine;
-                                match base64::engine::general_purpose::STANDARD.decode(&text) {
-                                    Ok(encrypted) => {
-                                        match crate::crypto::decrypt(key, &encrypted) {
-                                            Ok(plaintext) => String::from_utf8_lossy(&plaintext).to_string(),
-                                            Err(_) => text, // show raw if decrypt fails
+                // Poll incoming messages + detect disconnection
+                let mut channel_disconnected = false;
+                loop {
+                    match bridge_rx.try_recv() {
+                        Ok(msg) => match msg {
+                            ServerMessage::Chat { from, text, .. } => {
+                                let text = if let Some(ref key) = encryption_key {
+                                    use base64::Engine;
+                                    match base64::engine::general_purpose::STANDARD.decode(&text) {
+                                        Ok(encrypted) => {
+                                            match crate::crypto::decrypt(key, &encrypted) {
+                                                Ok(plaintext) => String::from_utf8_lossy(&plaintext).to_string(),
+                                                Err(_) => text,
+                                            }
                                         }
+                                        Err(_) => text,
                                     }
-                                    Err(_) => text, // not encrypted, show as-is
+                                } else {
+                                    text
+                                };
+                                messages.push(ChatMsg { from, text });
+                            }
+                            ServerMessage::UserJoined { username: u, user_id: uid } => {
+                                if !users.contains(&u) {
+                                    users.push(u.clone());
                                 }
-                            } else {
-                                text
-                            };
-                            messages.push(ChatMsg { from, text });
-                        }
-                        ServerMessage::UserJoined { username: u, user_id: uid } => {
-                            if !users.contains(&u) {
-                                users.push(u.clone());
+                                if let Some(uid) = uid {
+                                    user_id_map.insert(u.clone(), uid);
+                                }
+                                messages.push(ChatMsg {
+                                    from: "system".into(),
+                                    text: format!("{u} joined"),
+                                });
                             }
-                            if let Some(uid) = uid {
-                                user_id_map.insert(u.clone(), uid);
+                            ServerMessage::UserLeft { username: u } => {
+                                users.retain(|x| x != &u);
+                                messages.push(ChatMsg {
+                                    from: "system".into(),
+                                    text: format!("{u} left"),
+                                });
                             }
-                            messages.push(ChatMsg {
-                                from: "system".into(),
-                                text: format!("{u} joined"),
-                            });
+                            _ => {}
+                        },
+                        Err(std_mpsc::TryRecvError::Empty) => break,
+                        Err(std_mpsc::TryRecvError::Disconnected) => {
+                            channel_disconnected = true;
+                            break;
                         }
-                        ServerMessage::UserLeft { username: u } => {
-                            users.retain(|x| x != &u);
-                            messages.push(ChatMsg {
-                                from: "system".into(),
-                                text: format!("{u} left"),
-                            });
-                        }
-                        _ => {}
                     }
+                }
+
+                // Handle disconnection → trigger reconnect
+                if channel_disconnected && *reconnect_state == ReconnectState::Connected {
+                    if let Some(_params) = connect_params.as_ref() {
+                        let now = std::time::Instant::now();
+                        *reconnect_state = ReconnectState::Reconnecting {
+                            attempt: 0,
+                            next_try: now,
+                            started: now,
+                        };
+                        messages.push(ChatMsg {
+                            from: "system".into(),
+                            text: "Connection lost. Reconnecting...".into(),
+                        });
+                    }
+                }
+
+                // Reconnect state machine — collect action to execute after match
+                let mut reconnect_action: Option<ReconnectParams> = None;
+                let mut should_go_login = false;
+                if let ReconnectState::Reconnecting { attempt, next_try, started } = reconnect_state {
+                    let now = std::time::Instant::now();
+                    if now.duration_since(*started).as_secs() > 120 {
+                        *reconnect_state = ReconnectState::GaveUp;
+                        messages.push(ChatMsg {
+                            from: "system".into(),
+                            text: "Reconnection failed. Returning to login...".into(),
+                        });
+                        should_go_login = true;
+                    } else if now >= *next_try && !self.reconnect_pending {
+                        if let Some(params) = connect_params.clone() {
+                            *attempt += 1;
+                            let delay_secs = std::cmp::min(30, 1u64 << (*attempt).min(5));
+                            *next_try = now + std::time::Duration::from_secs(delay_secs);
+                            reconnect_action = Some(params);
+                        }
+                    }
+                }
+                if should_go_login {
+                    self.deferred_go_login = connect_params.clone();
+                }
+                if let Some(params) = reconnect_action {
+                    self.deferred_reconnect = Some(params);
                 }
 
                 // Sync open_mic state to audio engine
@@ -686,13 +813,23 @@ impl eframe::App for App {
                             } else {
                                 "⚠ No Audio"
                             };
-                            ui.label(format!(
-                                "{} {} · Room: {} · {} online",
-                                voice_status,
-                                username,
-                                room,
-                                users.len()
-                            ));
+                            let reconnect_status = match reconnect_state {
+                                ReconnectState::Reconnecting { attempt, .. } => {
+                                    Some(format!("⟳ Reconnecting (attempt {attempt})..."))
+                                }
+                                _ => None,
+                            };
+                            if let Some(ref rs) = reconnect_status {
+                                ui.colored_label(egui::Color32::YELLOW, rs);
+                            } else {
+                                ui.label(format!(
+                                    "{} {} · Room: {} · {} online",
+                                    voice_status,
+                                    username,
+                                    room,
+                                    users.len()
+                                ));
+                            }
                         });
                     });
 
@@ -754,6 +891,39 @@ impl eframe::App for App {
                         });
                 });
             }
+        }
+
+        // Execute deferred reconnect actions (outside the state match to avoid borrow issues)
+        if let Some(params) = self.deferred_go_login.take() {
+            let input_devices = devices::list_input_devices();
+            let output_devices = devices::list_output_devices();
+            self.state = Screen::Login {
+                server_addr: params.server_addr,
+                username: params.username,
+                room: params.room,
+                password: params.password,
+                error: Some("Connection lost".into()),
+                connecting: false,
+                dispatched: false,
+                input_devices,
+                output_devices,
+                selected_input: 0,
+                selected_output: 0,
+            };
+        } else if let Some(params) = self.deferred_reconnect.take() {
+            let pw = params.password.clone();
+            let raw_pw = if pw.is_empty() { None } else { Some(pw.clone()) };
+            self.pending_devices = Some((params.input_device_idx, params.output_device_idx));
+            self.reconnect_pending = true;
+            self.initiate_connect(
+                ctx,
+                params.server_addr,
+                params.username,
+                params.room,
+                pw,
+                raw_pw,
+                true,
+            );
         }
     }
 }
