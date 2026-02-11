@@ -837,6 +837,92 @@ impl eframe::App for App {
                 // Request repaint for live indicators (VAD, PTT)
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
+                // Status bar (very bottom — rendered before side panel so it claims space)
+                egui::TopBottomPanel::bottom("status_bar")
+                    .exact_height(24.0)
+                    .show(ctx, |ui| {
+                        ui.horizontal_centered(|ui| {
+                            let voice_status = if let Some(ref audio) = audio {
+                                if audio.deafened.load(Ordering::Relaxed) {
+                                    "DEAFENED"
+                                } else if audio.muted.load(Ordering::Relaxed) {
+                                    "MUTED"
+                                } else if audio.open_mic.load(Ordering::Relaxed) {
+                                    "Open Mic"
+                                } else if audio.ptt_active.load(Ordering::Relaxed) {
+                                    "PTT Active"
+                                } else {
+                                    "PTT Ready"
+                                }
+                            } else {
+                                "No Audio"
+                            };
+                            let reconnect_status = match reconnect_state {
+                                ReconnectState::Reconnecting { attempt, .. } => {
+                                    Some(format!("Reconnecting (attempt {attempt})..."))
+                                }
+                                _ => None,
+                            };
+                            if let Some(ref rs) = reconnect_status {
+                                ui.colored_label(egui::Color32::YELLOW, rs);
+                            } else {
+                                let latency_str = match latency_ms {
+                                    Some(ms) => format!("{ms}ms"),
+                                    None => "...".to_string(),
+                                };
+                                ui.label(format!(
+                                    "{} {} · Room: {} · {} online · Loss: {:.1}% · Ping: {}",
+                                    voice_status,
+                                    username,
+                                    room,
+                                    users.len(),
+                                    upload_loss,
+                                    latency_str,
+                                ));
+                            }
+                        });
+                    });
+
+                // Input bar (above status)
+                egui::TopBottomPanel::bottom("input_panel")
+                    .exact_height(32.0)
+                    .show(ctx, |ui| {
+                        ui.horizontal_centered(|ui| {
+                            let response = ui.add_sized(
+                                [ui.available_width() - 35.0, 22.0],
+                                egui::TextEdit::singleline(input)
+                                    .hint_text("type a message..."),
+                            );
+
+                            let enter_pressed = response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let send_img = egui::ImageButton::new(egui::load::SizedTexture::new(send_tid, egui::vec2(20.0, 20.0)));
+                            let send = ui.add(send_img).on_hover_text("Send").clicked() || enter_pressed;
+
+                            if send && !input.trim().is_empty() {
+                                let text = input.trim().to_string();
+                                let wire_text = if let Some(ref key) = encryption_key {
+                                    use base64::Engine;
+                                    match crate::crypto::encrypt(key, text.as_bytes()) {
+                                        Ok(encrypted) => base64::engine::general_purpose::STANDARD.encode(&encrypted),
+                                        Err(_) => text.clone(),
+                                    }
+                                } else {
+                                    text.clone()
+                                };
+                                let _ = client_tx.send(ClientMessage::Chat {
+                                    text: wire_text,
+                                });
+                                messages.push(ChatMsg {
+                                    from: username.clone(),
+                                    text,
+                                });
+                                input.clear();
+                                response.request_focus();
+                            }
+                        });
+                    });
+
                 // Users panel (left)
                 egui::SidePanel::left("users_panel")
                     .default_width(160.0)
@@ -893,7 +979,6 @@ impl eframe::App for App {
                                 let is_vad = audio.vad_active.load(Ordering::Relaxed);
 
                                 // Mute/Deafen buttons (FIRST in bottom_up = appears at very bottom)
-                                ui.add_space(4.0);
                                 ui.horizontal(|ui| {
                                     let mute_icon = if is_muted { mic_off_tid } else { mic_on_tid };
                                     let mute_img = egui::ImageButton::new(egui::load::SizedTexture::new(mute_icon, egui::vec2(24.0, 24.0)));
@@ -1012,93 +1097,6 @@ impl eframe::App for App {
 
                             } else {
                                 ui.colored_label(egui::Color32::YELLOW, "! No audio");
-                            }
-                        });
-                    });
-
-                // Status bar (very bottom)
-                egui::TopBottomPanel::bottom("status_bar")
-                    .exact_height(24.0)
-                    .show(ctx, |ui| {
-                        ui.horizontal_centered(|ui| {
-                            let voice_status = if let Some(ref audio) = audio {
-                                if audio.deafened.load(Ordering::Relaxed) {
-                                    "DEAFENED"
-                                } else if audio.muted.load(Ordering::Relaxed) {
-                                    "MUTED"
-                                } else if audio.open_mic.load(Ordering::Relaxed) {
-                                    "Open Mic"
-                                } else if audio.ptt_active.load(Ordering::Relaxed) {
-                                    "PTT Active"
-                                } else {
-                                    "PTT Ready"
-                                }
-                            } else {
-                                "No Audio"
-                            };
-                            let reconnect_status = match reconnect_state {
-                                ReconnectState::Reconnecting { attempt, .. } => {
-                                    Some(format!("Reconnecting (attempt {attempt})..."))
-                                }
-                                _ => None,
-                            };
-                            if let Some(ref rs) = reconnect_status {
-                                ui.colored_label(egui::Color32::YELLOW, rs);
-                            } else {
-                                let latency_str = match latency_ms {
-                                    Some(ms) => format!("{ms}ms"),
-                                    None => "...".to_string(),
-                                };
-                                ui.label(format!(
-                                    "{} {} · Room: {} · {} online · Loss: {:.1}% · Ping: {}",
-                                    voice_status,
-                                    username,
-                                    room,
-                                    users.len(),
-                                    upload_loss,
-                                    latency_str,
-                                ));
-                            }
-                        });
-                    });
-
-                // Input bar (above status)
-                egui::TopBottomPanel::bottom("input_panel")
-                    .exact_height(32.0)
-                    .show(ctx, |ui| {
-                        ui.horizontal_centered(|ui| {
-                            let response = ui.add_sized(
-                                [ui.available_width() - 35.0, 22.0],
-                                egui::TextEdit::singleline(input)
-                                    .hint_text("type a message..."),
-                            );
-
-                            let enter_pressed = response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            let send_img = egui::ImageButton::new(egui::load::SizedTexture::new(send_tid, egui::vec2(20.0, 20.0)));
-                            let send = ui.add(send_img).on_hover_text("Send").clicked() || enter_pressed;
-
-                            if send && !input.trim().is_empty() {
-                                let text = input.trim().to_string();
-                                // Encrypt chat text if encryption is active
-                                let wire_text = if let Some(ref key) = encryption_key {
-                                    use base64::Engine;
-                                    match crate::crypto::encrypt(key, text.as_bytes()) {
-                                        Ok(encrypted) => base64::engine::general_purpose::STANDARD.encode(&encrypted),
-                                        Err(_) => text.clone(),
-                                    }
-                                } else {
-                                    text.clone()
-                                };
-                                let _ = client_tx.send(ClientMessage::Chat {
-                                    text: wire_text,
-                                });
-                                messages.push(ChatMsg {
-                                    from: username.clone(),
-                                    text,
-                                });
-                                input.clear();
-                                response.request_focus();
                             }
                         });
                     });
