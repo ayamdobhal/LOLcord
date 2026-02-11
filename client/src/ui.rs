@@ -196,53 +196,8 @@ impl App {
         self.logo_texture.get_or_insert_with(|| {
             let bytes = include_bytes!("../assets/logo.png");
             let img = image::load_from_memory(bytes).expect("failed to load logo");
-            let mut rgba = img.into_rgba8();
+            let rgba = img.into_rgba8();
             let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-
-            // Remove pinkish gradient background by sampling corner colors
-            // and making pixels transparent if they're close to the background
-            {
-                // Sample the 4 corner pixels as background reference (image is RGB, alpha=255)
-                let corners = [
-                    (0usize, 0usize),
-                    (w - 1, 0),
-                    (0, h - 1),
-                    (w - 1, h - 1),
-                ];
-                let ref_colors: Vec<[f32; 3]> = corners.iter().map(|&(x, y)| {
-                    let p = rgba.get_pixel(x as u32, y as u32);
-                    [p[0] as f32, p[1] as f32, p[2] as f32]
-                }).collect();
-
-                // For each pixel, compute min color distance to any corner reference
-                // If close enough, make transparent (with soft edge)
-                let threshold = 55.0f32; // distance below which we consider it background
-                let soft_edge = 20.0f32; // fade zone
-
-                for y in 0..h {
-                    for x in 0..w {
-                        let p = rgba.get_pixel(x as u32, y as u32);
-                        let pc = [p[0] as f32, p[1] as f32, p[2] as f32];
-
-                        let min_dist = ref_colors.iter().map(|rc| {
-                            let dr = pc[0] - rc[0];
-                            let dg = pc[1] - rc[1];
-                            let db = pc[2] - rc[2];
-                            (dr * dr + dg * dg + db * db).sqrt()
-                        }).fold(f32::MAX, f32::min);
-
-                        if min_dist < threshold + soft_edge {
-                            let alpha = if min_dist < threshold {
-                                0u8
-                            } else {
-                                ((min_dist - threshold) / soft_edge * 255.0) as u8
-                            };
-                            rgba.get_pixel_mut(x as u32, y as u32)[3] = alpha;
-                        }
-                    }
-                }
-            }
-
             let size = [w, h];
             let pixels = rgba.into_raw();
             let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
@@ -384,7 +339,8 @@ impl eframe::App for App {
                         }
                     }
                     crate::tray::TrayCommand::Quit => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.save_settings_from_state();
+                        std::process::exit(0);
                     }
                 }
             }
@@ -397,6 +353,9 @@ impl eframe::App for App {
                 }
             }
         }
+
+        // Always repaint periodically so tray events are polled even when minimized
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
         // Check for connection results
         if let Ok(result) = self.connect_rx.try_recv() {
@@ -815,21 +774,25 @@ impl eframe::App for App {
                 egui::SidePanel::left("users_panel")
                     .default_width(160.0)
                     .show(ctx, |ui| {
-                        ui.heading(format!("🔊 {room}"));
+                        ui.heading(format!("# {room}"));
                         ui.separator();
                         for user in users.iter() {
                             if user == username.as_str() {
-                                ui.label(format!("🎤 {user} (you)"));
+                                ui.label(format!("{user} (you)"));
                             } else {
-                                let quality_icon = user_id_map.get(user)
+                                let quality_color = user_id_map.get(user)
                                     .and_then(|uid| quality_stats.get(uid))
                                     .map(|&loss| {
-                                        if loss < 2.0 { "🟢" }
-                                        else if loss < 10.0 { "🟡" }
-                                        else { "🔴" }
-                                    })
-                                    .unwrap_or("🔊");
-                                ui.label(format!("{quality_icon} {user}"));
+                                        if loss < 2.0 { egui::Color32::GREEN }
+                                        else if loss < 10.0 { egui::Color32::YELLOW }
+                                        else { egui::Color32::RED }
+                                    });
+                                ui.horizontal(|ui| {
+                                    if let Some(color) = quality_color {
+                                        ui.colored_label(color, "●");
+                                    }
+                                    ui.label(user);
+                                });
                                 // Per-user volume slider
                                 if let Some(&uid) = user_id_map.get(user) {
                                     let mut vol = user_volumes
@@ -866,17 +829,17 @@ impl eframe::App for App {
                                 if is_open && is_vad && !is_muted && !is_deaf {
                                     ui.colored_label(
                                         egui::Color32::from_rgb(80, 220, 80),
-                                        "🎙 TRANSMITTING",
+                                        ">> TRANSMITTING",
                                     );
                                 } else if is_open && !is_muted && !is_deaf {
                                     ui.colored_label(
                                         egui::Color32::GRAY,
-                                        "🎙 Open Mic (silent)",
+                                        "Open Mic (silent)",
                                     );
                                 } else if is_ptt && !is_muted && !is_deaf {
                                     ui.colored_label(
                                         egui::Color32::from_rgb(80, 220, 80),
-                                        "🎙 TRANSMITTING",
+                                        ">> TRANSMITTING",
                                     );
                                 }
 
@@ -884,13 +847,13 @@ impl eframe::App for App {
 
                                 // Voice mode toggle
                                 if ui
-                                    .selectable_label(*use_open_mic, "🎤 Open Mic")
+                                    .selectable_label(*use_open_mic, "Open Mic")
                                     .clicked()
                                 {
                                     *use_open_mic = true;
                                 }
                                 if ui
-                                    .selectable_label(!*use_open_mic, "📻 Push to Talk")
+                                    .selectable_label(!*use_open_mic, "Push to Talk")
                                     .clicked()
                                 {
                                     *use_open_mic = false;
@@ -915,7 +878,7 @@ impl eframe::App for App {
                                 if !*use_open_mic {
                                     if *listening_for_ptt {
                                         // Actively listening for a key/mouse press
-                                        let btn = ui.button("⏳ Press any key/button... (Esc to cancel)");
+                                        let btn = ui.button("Press any key/button... (Esc to cancel)");
                                         if btn.clicked() {
                                             *listening_for_ptt = false;
                                         }
@@ -934,7 +897,7 @@ impl eframe::App for App {
                                         // Keep repainting while listening
                                         ctx.request_repaint();
                                     } else {
-                                        if ui.button(format!("🎤 PTT: {}", ptt_bind_name)).clicked() {
+                                        if ui.button(format!("PTT: {}", ptt_bind_name)).clicked() {
                                             *listening_for_ptt = true;
                                         }
                                     }
@@ -944,13 +907,13 @@ impl eframe::App for App {
 
                                 // Noise suppression toggle
                                 let ns_on = audio.noise_suppression.load(Ordering::Relaxed);
-                                if ui.selectable_label(ns_on, "🔉 Noise Suppression").clicked() {
+                                if ui.selectable_label(ns_on, "Noise Suppression").clicked() {
                                     audio.noise_suppression.store(!ns_on, Ordering::Relaxed);
                                 }
 
                                 // Noise gate toggle + threshold slider
                                 let ng_on = audio.noise_gate_enabled.load(Ordering::Relaxed);
-                                if ui.selectable_label(ng_on, "🚪 Noise Gate").clicked() {
+                                if ui.selectable_label(ng_on, "Noise Gate").clicked() {
                                     audio.noise_gate_enabled.store(!ng_on, Ordering::Relaxed);
                                 }
                                 if ng_on {
@@ -964,14 +927,18 @@ impl eframe::App for App {
                                     });
                                 }
 
-                                if ui.selectable_label(is_muted, "🔇 Mute").clicked() {
+                                let mute_text = if is_muted { "MIC OFF" } else { "MIC" };
+                                let mute_color = if is_muted { egui::Color32::RED } else { ui.visuals().text_color() };
+                                if ui.add(egui::Button::new(egui::RichText::new(mute_text).color(mute_color))).clicked() {
                                     audio.muted.store(!is_muted, Ordering::Relaxed);
                                 }
-                                if ui.selectable_label(is_deaf, "🔇 Deafen").clicked() {
+                                let deaf_text = if is_deaf { "DEAF" } else { "SOUND" };
+                                let deaf_color = if is_deaf { egui::Color32::RED } else { ui.visuals().text_color() };
+                                if ui.add(egui::Button::new(egui::RichText::new(deaf_text).color(deaf_color))).clicked() {
                                     audio.deafened.store(!is_deaf, Ordering::Relaxed);
                                 }
                             } else {
-                                ui.colored_label(egui::Color32::YELLOW, "⚠ No audio");
+                                ui.colored_label(egui::Color32::YELLOW, "! No audio");
                             }
                         });
                     });
@@ -983,38 +950,38 @@ impl eframe::App for App {
                         ui.horizontal_centered(|ui| {
                             let voice_status = if let Some(ref audio) = audio {
                                 if audio.deafened.load(Ordering::Relaxed) {
-                                    "🔇 Deafened"
+                                    "DEAFENED"
                                 } else if audio.muted.load(Ordering::Relaxed) {
-                                    "🔇 Muted"
+                                    "MUTED"
                                 } else if audio.open_mic.load(Ordering::Relaxed) {
-                                    "🎙 Open Mic"
+                                    "Open Mic"
                                 } else if audio.ptt_active.load(Ordering::Relaxed) {
-                                    "🎙 PTT Active"
+                                    "PTT Active"
                                 } else {
-                                    "🎤 PTT Ready"
+                                    "PTT Ready"
                                 }
                             } else {
-                                "⚠ No Audio"
+                                "No Audio"
                             };
                             let reconnect_status = match reconnect_state {
                                 ReconnectState::Reconnecting { attempt, .. } => {
-                                    Some(format!("⟳ Reconnecting (attempt {attempt})..."))
+                                    Some(format!("Reconnecting (attempt {attempt})..."))
                                 }
                                 _ => None,
                             };
                             if let Some(ref rs) = reconnect_status {
                                 ui.colored_label(egui::Color32::YELLOW, rs);
                             } else {
-                                let upload_icon = if *upload_loss < 2.0 { "🟢" }
-                                    else if *upload_loss < 10.0 { "🟡" }
-                                    else { "🔴" };
+                                let upload_quality = if *upload_loss < 2.0 { "Good" }
+                                    else if *upload_loss < 10.0 { "Fair" }
+                                    else { "Poor" };
                                 ui.label(format!(
-                                    "{} {} · Room: {} · {} online · Upload {}",
+                                    "{} {} · Room: {} · {} online · Upload: {}",
                                     voice_status,
                                     username,
                                     room,
                                     users.len(),
-                                    upload_icon,
+                                    upload_quality,
                                 ));
                             }
                         });
