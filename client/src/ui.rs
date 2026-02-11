@@ -428,6 +428,9 @@ impl eframe::App for App {
                     audio.open_mic.store(*use_open_mic, Ordering::Relaxed);
                 }
 
+                // Request repaint for live indicators (VAD, PTT)
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+
                 // Users panel (left)
                 egui::SidePanel::left("users_panel")
                     .default_width(160.0)
@@ -469,11 +472,18 @@ impl eframe::App for App {
                                 let is_ptt = audio.ptt_active.load(Ordering::Relaxed);
                                 let is_open = audio.open_mic.load(Ordering::Relaxed);
 
+                                let is_vad = audio.vad_active.load(Ordering::Relaxed);
+
                                 // Transmit indicator
-                                if is_open && !is_muted && !is_deaf {
+                                if is_open && is_vad && !is_muted && !is_deaf {
                                     ui.colored_label(
                                         egui::Color32::from_rgb(80, 220, 80),
-                                        "🎙 OPEN MIC",
+                                        "🎙 TRANSMITTING",
+                                    );
+                                } else if is_open && !is_muted && !is_deaf {
+                                    ui.colored_label(
+                                        egui::Color32::GRAY,
+                                        "🎙 Open Mic (silent)",
                                     );
                                 } else if is_ptt && !is_muted && !is_deaf {
                                     ui.colored_label(
@@ -496,6 +506,21 @@ impl eframe::App for App {
                                     .clicked()
                                 {
                                     *use_open_mic = false;
+                                }
+
+                                // VAD sensitivity (only in open mic mode)
+                                if *use_open_mic {
+                                    let mut thresh = audio.vad_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().slider_width = 80.0;
+                                        ui.label("Sensitivity:");
+                                        // Invert: low threshold = high sensitivity
+                                        let mut sens = 1.0 - (thresh - 0.001) / 0.099;
+                                        if ui.add(egui::Slider::new(&mut sens, 0.0..=1.0).show_value(false)).changed() {
+                                            thresh = 0.001 + (1.0 - sens) * 0.099;
+                                            audio.vad_threshold.store((thresh * 10000.0) as u32, Ordering::Relaxed);
+                                        }
+                                    });
                                 }
 
                                 // PTT key selector (only show when PTT mode)

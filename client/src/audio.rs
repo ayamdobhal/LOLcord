@@ -23,6 +23,10 @@ pub struct AudioState {
     pub deafened: AtomicBool,
     /// If true, transmit always (no PTT needed). If false, PTT mode.
     pub open_mic: AtomicBool,
+    /// Whether VAD detected voice (for UI indicator).
+    pub vad_active: AtomicBool,
+    /// VAD threshold (RMS). Range ~0.001 to 0.1. Stored as u32 (value * 10000).
+    pub vad_threshold: std::sync::atomic::AtomicU32,
     capture_cons: Mutex<ringbuf::HeapCons<f32>>,
     playback_prod: Mutex<ringbuf::HeapProd<f32>>,
     encoder: Mutex<Encoder>,
@@ -34,8 +38,12 @@ unsafe impl Sync for AudioState {}
 
 impl AudioState {
     pub fn try_encode_frame(&self) -> Option<Vec<u8>> {
-        let transmitting = self.open_mic.load(Ordering::Relaxed) || self.ptt_active.load(Ordering::Relaxed);
-        if !transmitting || self.muted.load(Ordering::Relaxed) {
+        let is_open_mic = self.open_mic.load(Ordering::Relaxed);
+        let is_ptt = self.ptt_active.load(Ordering::Relaxed);
+        let is_muted = self.muted.load(Ordering::Relaxed);
+
+        if is_muted || (!is_open_mic && !is_ptt) {
+            self.vad_active.store(false, Ordering::Relaxed);
             if let Ok(mut cons) = self.capture_cons.lock() {
                 let mut discard = [0.0f32; 960];
                 while cons.pop_slice(&mut discard) == 960 {}
@@ -50,6 +58,22 @@ impl AudioState {
         };
 
         if got < voice::FRAME_SIZE {
+            self.vad_active.store(false, Ordering::Relaxed);
+            return None;
+        }
+
+        // VAD: compute RMS energy
+        let rms = {
+            let sum_sq: f32 = pcm.iter().map(|&s| s * s).sum();
+            (sum_sq / pcm.len() as f32).sqrt()
+        };
+
+        let threshold = self.vad_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
+        let voice_detected = rms >= threshold;
+        self.vad_active.store(voice_detected, Ordering::Relaxed);
+
+        // In open mic mode, gate on VAD. In PTT mode, always transmit.
+        if is_open_mic && !voice_detected {
             return None;
         }
 
@@ -268,6 +292,8 @@ pub fn start_audio(
         muted: AtomicBool::new(false),
         deafened: AtomicBool::new(false),
         open_mic: AtomicBool::new(true), // default: open mic
+        vad_active: AtomicBool::new(false),
+        vad_threshold: std::sync::atomic::AtomicU32::new(50), // 0.005 RMS default
         capture_cons: Mutex::new(capture_cons),
         playback_prod: Mutex::new(playback_prod),
         encoder: Mutex::new(encoder),
