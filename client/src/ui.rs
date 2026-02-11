@@ -905,8 +905,7 @@ impl eframe::App for App {
                                         audio.deafened.store(!is_deaf, Ordering::Relaxed);
                                     }
                                 });
-
-                                ui.separator();
+                                ui.add_space(2.0);
 
                                 // Transmit indicator
                                 if is_open && is_vad && !is_muted && !is_deaf {
