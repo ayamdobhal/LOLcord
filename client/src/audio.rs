@@ -21,6 +21,8 @@ pub struct AudioState {
     pub ptt_active: AtomicBool,
     pub muted: AtomicBool,
     pub deafened: AtomicBool,
+    /// If true, transmit always (no PTT needed). If false, PTT mode.
+    pub open_mic: AtomicBool,
     capture_cons: Mutex<ringbuf::HeapCons<f32>>,
     playback_prod: Mutex<ringbuf::HeapProd<f32>>,
     encoder: Mutex<Encoder>,
@@ -32,7 +34,8 @@ unsafe impl Sync for AudioState {}
 
 impl AudioState {
     pub fn try_encode_frame(&self) -> Option<Vec<u8>> {
-        if !self.ptt_active.load(Ordering::Relaxed) || self.muted.load(Ordering::Relaxed) {
+        let transmitting = self.open_mic.load(Ordering::Relaxed) || self.ptt_active.load(Ordering::Relaxed);
+        if !transmitting || self.muted.load(Ordering::Relaxed) {
             if let Ok(mut cons) = self.capture_cons.lock() {
                 let mut discard = [0.0f32; 960];
                 while cons.pop_slice(&mut discard) == 960 {}
@@ -203,26 +206,15 @@ fn from_mono_48k(data: &[f32], channels: u16, sample_rate: u32) -> Vec<f32> {
 }
 
 /// Start audio I/O and return the shared AudioState + streams.
+/// Device indices: None = system default, Some(n) = specific device.
 pub fn start_audio(
     input_device_idx: Option<usize>,
     output_device_idx: Option<usize>,
 ) -> Result<(Arc<AudioState>, cpal::Stream, cpal::Stream)> {
-    let host = cpal::default_host();
-
-    let input_device = match input_device_idx {
-        Some(idx) => crate::devices::get_input_device(idx)
-            .ok_or_else(|| anyhow::anyhow!("input device {idx} not found"))?,
-        None => host
-            .default_input_device()
-            .ok_or_else(|| anyhow::anyhow!("no input device"))?,
-    };
-    let output_device = match output_device_idx {
-        Some(idx) => crate::devices::get_output_device(idx)
-            .ok_or_else(|| anyhow::anyhow!("output device {idx} not found"))?,
-        None => host
-            .default_output_device()
-            .ok_or_else(|| anyhow::anyhow!("no output device"))?,
-    };
+    let input_device = crate::devices::get_input_device(input_device_idx)
+        .ok_or_else(|| anyhow::anyhow!("input device not found (idx={input_device_idx:?})"))?;
+    let output_device = crate::devices::get_output_device(output_device_idx)
+        .ok_or_else(|| anyhow::anyhow!("output device not found (idx={output_device_idx:?})"))?;
 
     tracing::info!("input device: {}", input_device.name().unwrap_or_default());
     tracing::info!("output device: {}", output_device.name().unwrap_or_default());
@@ -268,6 +260,7 @@ pub fn start_audio(
         ptt_active: AtomicBool::new(false),
         muted: AtomicBool::new(false),
         deafened: AtomicBool::new(false),
+        open_mic: AtomicBool::new(true), // default: open mic
         capture_cons: Mutex::new(capture_cons),
         playback_prod: Mutex::new(playback_prod),
         encoder: Mutex::new(encoder),
@@ -276,10 +269,22 @@ pub fn start_audio(
 
     // Input stream — capture, convert to mono 48kHz, push to ring buffer
     let prod = capture_prod.clone();
+    let input_frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let ifc = input_frame_count.clone();
     let input_stream = input_device.build_input_stream(
         &input_config,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
             let mono = to_mono_48k(data, in_channels, in_rate);
+            let count = ifc.fetch_add(1, Ordering::Relaxed);
+            if count % 500 == 0 {
+                // Log every ~10s at 48kHz/20ms
+                let max_amp = mono.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                tracing::debug!(
+                    "capture: frame={count}, samples={}, max_amp={:.4}",
+                    mono.len(),
+                    max_amp
+                );
+            }
             if let Ok(mut prod) = prod.lock() {
                 prod.push_slice(&mono);
             }
@@ -287,6 +292,7 @@ pub fn start_audio(
         |err| tracing::error!("input stream error: {err}"),
         None,
     )?;
+    tracing::info!("input stream started (frames logging every ~10s)");
 
     // Output stream — read mono 48kHz, convert to device format
     let cons = playback_cons.clone();

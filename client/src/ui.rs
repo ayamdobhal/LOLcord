@@ -1,12 +1,14 @@
 use crate::audio::{self, AudioState};
 use crate::devices::{self, DeviceInfo};
+use crate::hotkeys;
 use crate::net::Connection;
+use device_query::Keycode;
 use eframe::egui;
 use shared::{ClientMessage, ServerMessage};
 use std::sync::{
-    atomic::Ordering,
+    atomic::{AtomicBool, Ordering},
     mpsc as std_mpsc,
-    Arc,
+    Arc, Mutex,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -64,8 +66,15 @@ enum Screen {
         client_tx: tokio_mpsc::UnboundedSender<ClientMessage>,
         bridge_rx: std_mpsc::Receiver<ServerMessage>,
         audio: Option<Arc<AudioState>>,
-        /// Keep cpal streams alive
         _streams: Option<(cpal::Stream, cpal::Stream)>,
+        /// Global hotkey thread alive flag
+        hotkey_running: Option<Arc<AtomicBool>>,
+        /// Current PTT key (shared with hotkey thread)
+        ptt_key: Arc<Mutex<Keycode>>,
+        /// Index into key_names for the UI dropdown
+        ptt_key_idx: usize,
+        /// Open mic vs PTT mode
+        use_open_mic: bool,
     },
 }
 
@@ -196,6 +205,17 @@ impl eframe::App for App {
                         }
                     };
 
+                    // Start global hotkey polling thread
+                    let ptt_key = Arc::new(Mutex::new(Keycode::V));
+                    let hotkey_running = Arc::new(AtomicBool::new(true));
+                    if let Some(ref a) = audio {
+                        hotkeys::spawn_global_hotkey_thread(
+                            a.clone(),
+                            ptt_key.clone(),
+                            hotkey_running.clone(),
+                        );
+                    }
+
                     self.state = Screen::Connected {
                         room,
                         username,
@@ -206,6 +226,10 @@ impl eframe::App for App {
                         bridge_rx,
                         audio,
                         _streams: streams,
+                        hotkey_running: Some(hotkey_running),
+                        ptt_key,
+                        ptt_key_idx: 0, // "V" is index 0 in key_names()
+                        use_open_mic: true, // default: open mic
                     };
                 }
                 ConnectResult::Err(msg) => {
@@ -324,8 +348,8 @@ impl eframe::App for App {
                         let rm = room.trim().to_string();
                         let pw = password.clone();
                         // Stash device selections
-                        let in_idx = input_devices.get(*selected_input).map(|d| d.index);
-                        let out_idx = output_devices.get(*selected_output).map(|d| d.index);
+                        let in_idx = input_devices.get(*selected_input).and_then(|d| Some(d.index)).flatten();
+                        let out_idx = output_devices.get(*selected_output).and_then(|d| Some(d.index)).flatten();
                         self.pending_devices = Some((in_idx, out_idx));
                         self.initiate_connect(ctx, addr, user, rm, pw);
                         if let Screen::Login { dispatched, .. } = &mut self.state {
@@ -343,7 +367,10 @@ impl eframe::App for App {
                 client_tx,
                 bridge_rx,
                 audio,
-                _streams: _,
+                ptt_key,
+                ptt_key_idx,
+                use_open_mic,
+                ..
             } => {
                 // Poll incoming messages
                 while let Ok(msg) = bridge_rx.try_recv() {
@@ -371,15 +398,14 @@ impl eframe::App for App {
                     }
                 }
 
-                // Handle PTT key (V) — global-ish within the app window
+                // Sync open_mic state to audio engine
                 if let Some(ref audio) = audio {
-                    let v_held = ctx.input(|i| i.key_down(egui::Key::V));
-                    audio.ptt_active.store(v_held, Ordering::Relaxed);
+                    audio.open_mic.store(*use_open_mic, Ordering::Relaxed);
                 }
 
                 // Users panel (left)
                 egui::SidePanel::left("users_panel")
-                    .default_width(150.0)
+                    .default_width(160.0)
                     .show(ctx, |ui| {
                         ui.heading(format!("🔊 {room}"));
                         ui.separator();
@@ -397,19 +423,72 @@ impl eframe::App for App {
                                 let is_muted = audio.muted.load(Ordering::Relaxed);
                                 let is_deaf = audio.deafened.load(Ordering::Relaxed);
                                 let is_ptt = audio.ptt_active.load(Ordering::Relaxed);
+                                let is_open = audio.open_mic.load(Ordering::Relaxed);
 
-                                if is_ptt {
-                                    ui.colored_label(egui::Color32::from_rgb(80, 220, 80), "🎙 TRANSMITTING");
+                                // Transmit indicator
+                                if is_open && !is_muted && !is_deaf {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(80, 220, 80),
+                                        "🎙 OPEN MIC",
+                                    );
+                                } else if is_ptt && !is_muted && !is_deaf {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(80, 220, 80),
+                                        "🎙 TRANSMITTING",
+                                    );
                                 }
 
-                                if ui.selectable_label(is_deaf, "🔇 Deafen").clicked() {
-                                    audio.deafened.store(!is_deaf, Ordering::Relaxed);
+                                ui.separator();
+
+                                // Voice mode toggle
+                                if ui
+                                    .selectable_label(*use_open_mic, "🎤 Open Mic")
+                                    .clicked()
+                                {
+                                    *use_open_mic = true;
                                 }
+                                if ui
+                                    .selectable_label(!*use_open_mic, "📻 Push to Talk")
+                                    .clicked()
+                                {
+                                    *use_open_mic = false;
+                                }
+
+                                // PTT key selector (only show when PTT mode)
+                                if !*use_open_mic {
+                                    let names = hotkeys::key_names();
+                                    egui::ComboBox::from_id_salt("ptt_key")
+                                        .width(120.0)
+                                        .selected_text(format!(
+                                            "PTT: {}",
+                                            names.get(*ptt_key_idx).unwrap_or(&"?")
+                                        ))
+                                        .show_ui(ui, |ui| {
+                                            for (i, name) in names.iter().enumerate() {
+                                                if ui
+                                                    .selectable_value(ptt_key_idx, i, *name)
+                                                    .clicked()
+                                                {
+                                                    if let Some(kc) =
+                                                        hotkeys::keycode_from_name(name)
+                                                    {
+                                                        if let Ok(mut k) = ptt_key.lock() {
+                                                            *k = kc;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+                                }
+
+                                ui.separator();
+
                                 if ui.selectable_label(is_muted, "🔇 Mute").clicked() {
                                     audio.muted.store(!is_muted, Ordering::Relaxed);
                                 }
-
-                                ui.small("Hold V to talk");
+                                if ui.selectable_label(is_deaf, "🔇 Deafen").clicked() {
+                                    audio.deafened.store(!is_deaf, Ordering::Relaxed);
+                                }
                             } else {
                                 ui.colored_label(egui::Color32::YELLOW, "⚠ No audio");
                             }
@@ -423,16 +502,18 @@ impl eframe::App for App {
                         ui.horizontal_centered(|ui| {
                             let voice_status = if let Some(ref audio) = audio {
                                 if audio.deafened.load(Ordering::Relaxed) {
-                                    "🔇"
+                                    "🔇 Deafened"
                                 } else if audio.muted.load(Ordering::Relaxed) {
-                                    "🔇"
+                                    "🔇 Muted"
+                                } else if audio.open_mic.load(Ordering::Relaxed) {
+                                    "🎙 Open Mic"
                                 } else if audio.ptt_active.load(Ordering::Relaxed) {
-                                    "🎙"
+                                    "🎙 PTT Active"
                                 } else {
-                                    "🎤"
+                                    "🎤 PTT Ready"
                                 }
                             } else {
-                                "⚠"
+                                "⚠ No Audio"
                             };
                             ui.label(format!(
                                 "{} {} · Room: {} · {} online",

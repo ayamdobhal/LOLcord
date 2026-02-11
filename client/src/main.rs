@@ -1,5 +1,6 @@
 mod audio;
 mod devices;
+mod hotkeys;
 mod net;
 mod ui;
 mod voice;
