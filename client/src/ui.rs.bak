@@ -185,7 +185,7 @@ impl Application for App {
     type Theme = Theme;
     type Flags = ();
 
-    fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
+    fn new(_flags: Self::Flags) -> (Self, Task<Self::Message>) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(1)
@@ -234,14 +234,14 @@ impl Application for App {
             show_settings: false,
         };
 
-        (app, Command::none())
+        (app, Task::none())
     }
 
     fn title(&self) -> String {
         "LOLcord".to_string()
     }
 
-    fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
+    fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         // Poll server messages
         if let Screen::Connected { bridge_rx, .. } = &mut self.state {
             while let Ok(msg) = bridge_rx.try_recv() {
@@ -322,7 +322,7 @@ impl Application for App {
                         let pw = password.clone();
                         let raw_pw = if pw.is_empty() { None } else { Some(pw.clone()) };
                         
-                        return Command::perform(
+                        return Task::perform(
                             Self::connect(addr, user, rm, pw, raw_pw, false),
                             Message::ConnectionResult
                         );
@@ -597,7 +597,7 @@ impl Application for App {
                 // Poll for PTT capture when listening
                 if let Screen::Connected { listening_for_ptt: true, .. } = &self.state {
                     if let Some(bind) = hotkeys::capture_any_input() {
-                        return Command::perform(
+                        return Task::perform(
                             async move { bind },
                             |bind| Message::PttBindCaptured(Some(bind))
                         );

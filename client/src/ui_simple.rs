@@ -1,5 +1,5 @@
 use iced::widget::{button, column, container, text, text_input};
-use iced::{Alignment, Element, Length, Task, Theme};
+use iced::{Alignment, Application, Command, Element, Length, Theme};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -11,18 +11,18 @@ pub struct App {
     server_addr: String,
 }
 
-impl iced::Application for App {
+impl Application for App {
     type Executor = iced::executor::Default;
     type Message = Message;
     type Theme = Theme;
     type Flags = ();
 
-    fn new(_flags: Self::Flags) -> (Self, Task<Self::Message>) {
+    fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
         (
             App {
                 server_addr: "127.0.0.1:3000".to_string(),
             },
-            Task::none(),
+            Command::none(),
         )
     }
 
@@ -30,7 +30,7 @@ impl iced::Application for App {
         "LOLcord".to_string()
     }
 
-    fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
+    fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
         match message {
             Message::ServerAddrChanged(addr) => {
                 self.server_addr = addr;
@@ -39,7 +39,7 @@ impl iced::Application for App {
                 println!("Connecting to {}", self.server_addr);
             }
         }
-        Task::none()
+        Command::none()
     }
 
     fn view(&self) -> Element<Self::Message> {

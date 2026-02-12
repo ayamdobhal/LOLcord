@@ -2,7 +2,7 @@
 
 mod ui_simple;
 
-use iced::Settings;
+use iced::{Application, Settings};
 
 fn main() -> iced::Result {
     ui_simple::App::run(Settings::default())
