@@ -1,5 +1,9 @@
 [package]
 name = "client"
+
+[[bin]]
+name = "client_simple"
+path = "src/main_simple.rs"
 version = "0.1.0"
 edition = "2021"
 
@@ -11,8 +15,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-eframe = "0.31"
-egui = "0.31"
+iced = { version = "0.13", features = ["tokio", "image"] }
 cpal = "0.15"
 audiopus = "0.3.0-rc.0"
 ringbuf = "0.4"

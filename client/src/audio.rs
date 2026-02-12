@@ -5,7 +5,7 @@ use audiopus::{
     packet::Packet,
     Application, Channels, MutSignals, SampleRate,
 };
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::SupportedStreamConfigRange;
 use ringbuf::{
     traits::{Consumer, Producer, Split},
