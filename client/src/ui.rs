@@ -373,6 +373,10 @@ impl eframe::App for App {
                                 let cur = a.deafened.load(Ordering::Relaxed);
                                 let new_val = !cur;
                                 a.deafened.store(new_val, Ordering::Relaxed);
+                                if new_val {
+                                    a.muted.store(true, Ordering::Relaxed);
+                                    tray_state.mute_item.set_checked(true);
+                                }
                                 tray_state.deafen_item.set_checked(new_val);
                             }
                         }
@@ -903,7 +907,11 @@ impl eframe::App for App {
                                     let deaf_icon = if is_deaf { deaf_on_tid } else { deaf_off_tid };
                                     let deaf_img = egui::ImageButton::new(egui::load::SizedTexture::new(deaf_icon, egui::vec2(24.0, 24.0)));
                                     if ui.add(deaf_img).on_hover_text(if is_deaf { "Undeafen" } else { "Deafen" }).clicked() {
-                                        audio.deafened.store(!is_deaf, Ordering::Relaxed);
+                                        let new_deaf = !is_deaf;
+                                        audio.deafened.store(new_deaf, Ordering::Relaxed);
+                                        if new_deaf {
+                                            audio.muted.store(true, Ordering::Relaxed);
+                                        }
                                     }
                                 });
                                 ui.add_space(2.0);
