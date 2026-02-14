@@ -747,7 +747,17 @@ impl Application for App {
                 if let Screen::Connected { audio, .. } = &mut self.state {
                     if let Some(ref a) = audio {
                         let current = a.loopback.load(Ordering::Relaxed);
-                        a.loopback.store(!current, Ordering::Relaxed);
+                        let new_val = !current;
+                        a.loopback.store(new_val, Ordering::Relaxed);
+                        if new_val {
+                            // Loopback on: mute + deafen (private mic test)
+                            a.muted.store(true, Ordering::Relaxed);
+                            a.deafened.store(true, Ordering::Relaxed);
+                        } else {
+                            // Loopback off: unmute + undeafen
+                            a.muted.store(false, Ordering::Relaxed);
+                            a.deafened.store(false, Ordering::Relaxed);
+                        }
                     }
                 }
             }

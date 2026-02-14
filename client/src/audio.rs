@@ -396,7 +396,8 @@ pub fn start_audio(
     let output_stream = output_device.build_output_stream(
         &output_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            if deaf_state.deafened.load(Ordering::Relaxed) {
+            // Deafen silences output, but loopback overrides (need to hear yourself)
+            if deaf_state.deafened.load(Ordering::Relaxed) && !deaf_state.loopback.load(Ordering::Relaxed) {
                 data.fill(0.0);
                 return;
             }
