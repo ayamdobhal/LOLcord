@@ -34,6 +34,7 @@ pub struct AudioState {
     pub vad_threshold: std::sync::atomic::AtomicU32,
     /// Noise gate enabled.
     pub noise_gate_enabled: AtomicBool,
+    pub loopback: AtomicBool,
     /// Noise gate threshold (RMS * 10000). Below this, audio is faded to zero.
     pub noise_gate_threshold: std::sync::atomic::AtomicU32,
     capture_cons: Mutex<ringbuf::HeapCons<f32>>,
@@ -348,6 +349,7 @@ pub fn start_audio(
         vad_active: AtomicBool::new(false),
         vad_threshold: std::sync::atomic::AtomicU32::new(50), // 0.005 RMS default
         noise_gate_enabled: AtomicBool::new(false),
+        loopback: AtomicBool::new(false),
         noise_gate_threshold: std::sync::atomic::AtomicU32::new(30), // 0.003 RMS default
         capture_cons: Mutex::new(capture_cons),
         playback_prod: Mutex::new(playback_prod),
@@ -357,6 +359,7 @@ pub fn start_audio(
 
     // Input stream — capture, convert to mono 48kHz, push to ring buffer
     let prod = capture_prod.clone();
+    let loopback_state = state.clone();
     let input_frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let ifc = input_frame_count.clone();
     let input_stream = input_device.build_input_stream(
@@ -365,7 +368,6 @@ pub fn start_audio(
             let mono = to_mono_48k(data, in_channels, in_rate);
             let count = ifc.fetch_add(1, Ordering::Relaxed);
             if count % 500 == 0 {
-                // Log every ~10s at 48kHz/20ms
                 let max_amp = mono.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
                 tracing::debug!(
                     "capture: frame={count}, samples={}, max_amp={:.4}",
@@ -375,6 +377,12 @@ pub fn start_audio(
             }
             if let Ok(mut prod) = prod.lock() {
                 prod.push_slice(&mono);
+            }
+            // Loopback: feed captured audio to playback
+            if loopback_state.loopback.load(Ordering::Relaxed) {
+                if let Ok(mut pb) = loopback_state.playback_prod.lock() {
+                    pb.push_slice(&mono);
+                }
             }
         },
         |err| tracing::error!("input stream error: {err}"),

@@ -56,6 +56,7 @@ pub enum Message {
     PttBindCaptured(Option<PttBind>),
     ToggleNoiseSupression,
     ToggleNoiseGate,
+    ToggleLoopback,
     NoiseGateThresholdChanged(f32),
     UserVolumeChanged(u16, f32),
     
@@ -742,6 +743,14 @@ impl Application for App {
                     }
                 }
             }
+            Message::ToggleLoopback => {
+                if let Screen::Connected { audio, .. } = &mut self.state {
+                    if let Some(ref a) = audio {
+                        let current = a.loopback.load(Ordering::Relaxed);
+                        a.loopback.store(!current, Ordering::Relaxed);
+                    }
+                }
+            }
             Message::UserVolumeChanged(user_id, volume) => {
                 if let Screen::Connected { user_volumes, .. } = &mut self.state {
                     if let Ok(mut vols) = user_volumes.lock() {
@@ -1220,6 +1229,12 @@ impl App {
                         ].spacing(2)
                     );
                 }
+                // Loopback (hear yourself)
+                let lb_on = a.loopback.load(Ordering::Relaxed);
+                let lb_label = if lb_on { "Loopback: ON" } else { "Loopback: OFF" };
+                audio_controls = audio_controls.push(
+                    button(lb_label).on_press(Message::ToggleLoopback)
+                );
             } else {
                 audio_controls = audio_controls.push(text("! No audio"));
             }
