@@ -524,7 +524,12 @@ impl Application for App {
                 if let Screen::Connected { audio, .. } = &mut self.state {
                     if let Some(ref a) = audio {
                         let current = a.deafened.load(Ordering::Relaxed);
-                        a.deafened.store(!current, Ordering::Relaxed);
+                        let new_deaf = !current;
+                        a.deafened.store(new_deaf, Ordering::Relaxed);
+                        // Deafen implies mute
+                        if new_deaf {
+                            a.muted.store(true, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -692,7 +697,11 @@ impl Application for App {
                         if let Screen::Connected { audio, .. } = &mut self.state {
                             if let Some(ref a) = audio {
                                 let current = a.deafened.load(Ordering::Relaxed);
-                                a.deafened.store(!current, Ordering::Relaxed);
+                                let new_deaf = !current;
+                                a.deafened.store(new_deaf, Ordering::Relaxed);
+                                if new_deaf {
+                                    a.muted.store(true, Ordering::Relaxed);
+                                }
                             }
                         }
                     }
