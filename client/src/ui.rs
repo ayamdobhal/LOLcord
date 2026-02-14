@@ -86,7 +86,7 @@ enum ConnectResult {
         voice_port: u16,
         server_addr: String,
         client_tx: tokio_mpsc::UnboundedSender<ClientMessage>,
-        bridge_rx: std_mpsc::Receiver<ServerMessage>,
+        bridge_rx: Arc<Mutex<Option<std_mpsc::Receiver<ServerMessage>>>>,
         user_ids: HashMap<String, u16>,
         password: Option<String>,
         is_reconnect: bool,
@@ -156,7 +156,7 @@ enum Screen {
         messages: Vec<ChatMsg>,
         input: String,
         client_tx: tokio_mpsc::UnboundedSender<ClientMessage>,
-        bridge_rx: std_mpsc::Receiver<ServerMessage>,
+        bridge_rx: Arc<Mutex<Option<std_mpsc::Receiver<ServerMessage>>>>,
         audio: Option<Arc<AudioState>>,
         _streams: Option<(cpal::Stream, cpal::Stream)>,
         hotkey_running: Option<Arc<AtomicBool>>,
@@ -239,22 +239,38 @@ impl Application for App {
     }
 
     fn title(&self) -> String {
-        "LOLcord".to_string()
+        "LOLcord (Iced)".to_string()
     }
 
     fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
         // Poll server messages
+        let mut pending_messages = Vec::new();
         if let Screen::Connected { bridge_rx, .. } = &mut self.state {
-            while let Ok(msg) = bridge_rx.try_recv() {
-                self.update(Message::ServerMessage(msg));
+            if let Ok(mut receiver_guard) = bridge_rx.lock() {
+                if let Some(ref mut receiver) = receiver_guard.as_mut() {
+                    while let Ok(msg) = receiver.try_recv() {
+                        pending_messages.push(msg);
+                    }
+                }
             }
+        }
+        
+        // Process collected messages
+        for msg in pending_messages {
+            self.update(Message::ServerMessage(msg));
         }
 
         // Poll tray commands
+        let mut tray_commands = Vec::new();
         if let Some(ref tray_state) = self.tray_state {
             while let Ok(cmd) = tray_state.rx.try_recv() {
-                let _ = self.update(Message::TrayCommand(cmd));
+                tray_commands.push(cmd);
             }
+        }
+        
+        // Process collected tray commands
+        for cmd in tray_commands {
+            let _ = self.update(Message::TrayCommand(cmd));
         }
 
         match message {
@@ -302,7 +318,8 @@ impl Application for App {
                     output_devices,
                     .. 
                 } = &mut self.state {
-                    if username.trim().is_empty() {
+                    let user_trimmed = username.trim().to_string();
+                    if user_trimmed.is_empty() {
                         *error = Some("username required".into());
                     } else {
                         *connecting = true;
@@ -313,12 +330,9 @@ impl Application for App {
                         let out_idx = output_devices.get(*selected_output).and_then(|d| d.index);
                         self.pending_devices = Some((in_idx, out_idx));
                         
-                        // Save settings
-                        self.save_settings_from_state();
-                        
                         // Initiate connection
                         let addr = server_addr.clone();
-                        let user = username.trim().to_string();
+                        let user = user_trimmed;
                         let rm = room.trim().to_string();
                         let pw = password.clone();
                         let raw_pw = if pw.is_empty() { None } else { Some(pw.clone()) };
@@ -329,6 +343,9 @@ impl Application for App {
                         );
                     }
                 }
+                
+                // Save settings after handling connect logic
+                self.save_settings_from_state();
             }
             Message::ConnectionResult(result) => {
                 match result {
@@ -665,7 +682,7 @@ impl Application for App {
                                 self.reconnect_pending = true;
                                 let pw = params.password.clone();
                                 let raw_pw = if pw.is_empty() { None } else { Some(pw.clone()) };
-                                return Task::perform(
+                                return Command::perform(
                                     Self::connect(
                                         params.server_addr,
                                         params.username,
@@ -792,7 +809,7 @@ impl Application for App {
             }
         }
 
-        Task::none()
+        Command::none()
     }
 
     fn view(&self) -> Element<Self::Message> {
@@ -859,7 +876,8 @@ impl App {
                 let first = conn.server_rx.recv().await;
                 match first {
                     Some(ServerMessage::RoomState { room: r, users, user_id, room_id, voice_port, user_ids }) => {
-                        let (bridge_tx, bridge_rx) = std_mpsc::channel();
+                        let (bridge_tx, raw_bridge_rx) = std_mpsc::channel();
+                        let bridge_rx = Arc::new(Mutex::new(Some(raw_bridge_rx)));
                         
                         tokio::spawn(async move {
                             while let Some(msg) = conn.server_rx.recv().await {
@@ -981,7 +999,7 @@ impl App {
                 text_input("password", password)
                     .on_input(Message::PasswordChanged)
                     .on_submit(Message::ConnectPressed)
-                    .password()
+                    .secure(true)
                     .width(250)
             ].spacing(10),
             
@@ -1077,7 +1095,7 @@ impl App {
             };
 
             // Top bar
-            let logo = image(image::Handle::from_bytes(include_bytes!("../assets/logo.png").to_vec()))
+            let logo = image(image::Handle::from_memory(include_bytes!("../assets/logo.png").to_vec()))
                 .width(28).height(28);
             let top_bar = container(
                 row![
@@ -1152,15 +1170,15 @@ impl App {
                 let is_vad = a.vad_active.load(Ordering::Relaxed);
 
                 // Mute/Deafen buttons (custom icons)
-                let mic_icon: iced::widget::Image = if is_muted {
-                    image(image::Handle::from_bytes(include_bytes!("../assets/mic_off.png").to_vec()))
+                let mic_icon = if is_muted {
+                    image(image::Handle::from_memory(include_bytes!("../assets/mic_off.png").to_vec()))
                 } else {
-                    image(image::Handle::from_bytes(include_bytes!("../assets/mic_on.png").to_vec()))
+                    image(image::Handle::from_memory(include_bytes!("../assets/mic_on.png").to_vec()))
                 };
-                let deaf_icon: iced::widget::Image = if is_deaf {
-                    image(image::Handle::from_bytes(include_bytes!("../assets/deaf_on.png").to_vec()))
+                let deaf_icon = if is_deaf {
+                    image(image::Handle::from_memory(include_bytes!("../assets/deaf_on.png").to_vec()))
                 } else {
-                    image(image::Handle::from_bytes(include_bytes!("../assets/deaf_off.png").to_vec()))
+                    image(image::Handle::from_memory(include_bytes!("../assets/deaf_off.png").to_vec()))
                 };
 
                 let mute_btn = button(mic_icon.width(24).height(24))
@@ -1207,13 +1225,13 @@ impl App {
                 // PTT key selector (only show when PTT mode)
                 if !*use_open_mic {
                     let btn_text = if *listening_for_ptt {
-                        "Press any key... (Esc to cancel)"
+                        "Press any key... (Esc to cancel)".to_string()
                     } else {
-                        &format!("PTT: {}", ptt_bind_name)
+                        format!("PTT: {}", ptt_bind_name)
                     };
                     
                     audio_controls = audio_controls.push(
-                        button(btn_text).on_press(Message::PttBindPressed)
+                        button(text(&btn_text)).on_press(Message::PttBindPressed)
                     );
                 }
 
@@ -1285,7 +1303,7 @@ impl App {
                     .on_submit(Message::SendMessage)
                     .width(Length::Fill),
                 button(
-                    image(image::Handle::from_bytes(include_bytes!("../assets/send.png").to_vec()))
+                    image(image::Handle::from_memory(include_bytes!("../assets/send.png").to_vec()))
                         .width(20).height(20)
                 ).on_press(Message::SendMessage).padding(4)
             ]

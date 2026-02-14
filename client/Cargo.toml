@@ -1,11 +1,14 @@
 [package]
 name = "client"
+edition = "2021"
+
+[[bin]]
+name = "lolcord"
+path = "src/main.rs"
 
 [[bin]]
 name = "client_simple"
 path = "src/main_simple.rs"
-version = "0.1.0"
-edition = "2021"
 
 [dependencies]
 shared = { path = "../shared" }

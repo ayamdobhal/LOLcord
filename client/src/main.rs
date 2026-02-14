@@ -11,7 +11,7 @@ mod tray;
 mod ui;
 mod voice;
 
-use iced::Settings;
+use iced::{Application, Settings};
 
 fn main() -> iced::Result {
     // Log to file in config dir (overwrites each launch — no unbounded growth)
@@ -36,8 +36,8 @@ fn main() -> iced::Result {
 
     let settings = Settings {
         window: iced::window::Settings {
-            size: (800, 600),
-            min_size: Some((400, 300)),
+            size: iced::Size::new(800.0, 600.0),
+            min_size: Some(iced::Size::new(400.0, 300.0)),
             icon: load_icon(),
             ..iced::window::Settings::default()
         },
@@ -48,8 +48,10 @@ fn main() -> iced::Result {
 }
 
 fn load_icon() -> Option<iced::window::Icon> {
-    let bytes = include_bytes!("../assets/icon.png");
-    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
-    let (width, height) = img.dimensions();
-    iced::window::Icon::from_rgba(img.into_raw(), width, height).ok()
+    // TODO: Fix icon loading for iced 0.12
+    // let bytes = include_bytes!("../assets/icon.png");
+    // let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    // let (width, height) = img.dimensions();
+    // iced::window::Icon::from_rgba(img.into_raw(), width, height).ok()
+    None
 }

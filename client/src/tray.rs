@@ -3,6 +3,7 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 
+#[derive(Debug, Clone)]
 pub enum TrayCommand {
     Show,
     ToggleMute,
