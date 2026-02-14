@@ -6,7 +6,7 @@ use crate::net::Connection;
 use crate::settings::Settings;
 use iced::widget::{
     button, column, container, image, row, scrollable, text, text_input, 
-    slider, Space,
+    slider, pick_list, Space,
 };
 use iced::{
     executor, time, Alignment, Application, Command, Element, Length, Subscription, Theme
@@ -38,6 +38,8 @@ pub enum Message {
     PasswordChanged(String),
     InputDeviceSelected(usize),
     OutputDeviceSelected(usize),
+    InputDevicePicked(String),
+    OutputDevicePicked(String),
     ConnectPressed,
     
     // Connection result
@@ -302,6 +304,20 @@ impl Application for App {
             Message::OutputDeviceSelected(idx) => {
                 if let Screen::Login { selected_output, .. } = &mut self.state {
                     *selected_output = idx;
+                }
+            }
+            Message::InputDevicePicked(name) => {
+                if let Screen::Login { selected_input, input_devices, .. } = &mut self.state {
+                    if let Some(idx) = input_devices.iter().position(|d| d.name == name) {
+                        *selected_input = idx;
+                    }
+                }
+            }
+            Message::OutputDevicePicked(name) => {
+                if let Screen::Login { selected_output, output_devices, .. } = &mut self.state {
+                    if let Some(idx) = output_devices.iter().position(|d| d.name == name) {
+                        *selected_output = idx;
+                    }
                 }
             }
             Message::ConnectPressed => {
@@ -802,7 +818,7 @@ impl Application for App {
                 }
             }
             Message::SettingsPressed => {
-                self.show_settings = true;
+                self.show_settings = !self.show_settings;
             }
             Message::SettingsClosePressed => {
                 self.show_settings = false;
@@ -1005,14 +1021,20 @@ impl App {
             
             row![
                 text("Microphone:").width(80),
-                text(input_devices.get(selected_input).map(|d| d.name.as_str()).unwrap_or("Unknown"))
-                    .width(250)
+                pick_list(
+                    input_devices.iter().map(|d| d.name.clone()).collect::<Vec<_>>(),
+                    input_devices.get(selected_input).map(|d| d.name.clone()),
+                    Message::InputDevicePicked,
+                ).width(250)
             ].spacing(10),
             
             row![
                 text("Speaker:").width(80),
-                text(output_devices.get(selected_output).map(|d| d.name.as_str()).unwrap_or("Unknown"))
-                    .width(250)
+                pick_list(
+                    output_devices.iter().map(|d| d.name.clone()).collect::<Vec<_>>(),
+                    output_devices.get(selected_output).map(|d| d.name.clone()),
+                    Message::OutputDevicePicked,
+                ).width(250)
             ].spacing(10),
         ].spacing(10);
 
