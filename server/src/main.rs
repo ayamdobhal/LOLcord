@@ -4,7 +4,7 @@ mod room;
 use anyhow::Result;
 use config::ServerConfig;
 use room::RoomManager;
-use shared::{ClientMessage, ServerMessage, protocol, voice};
+use shared::{ClientMessage, ServerMessage, protocol, voice, screen};
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, UdpSocket};
@@ -36,15 +36,19 @@ async fn main() -> Result<()> {
     let udp_socket = Arc::new(UdpSocket::bind(format!("{}:{voice_port}", cfg.bind_addr)).await?);
     info!("UDP voice relay on {}:{voice_port}", cfg.bind_addr);
 
-    // Spawn UDP voice relay task
+    // Spawn UDP voice/screen relay task
     let rooms_voice = rooms.clone();
     let udp = udp_socket.clone();
     tokio::spawn(async move {
-        let mut buf = [0u8; voice::MAX_PACKET_SIZE];
+        const MAX_BUF_SIZE: usize = 2048; // Large enough for both voice and screen packets
+        let mut buf = [0u8; MAX_BUF_SIZE];
         let mut pkt_count: u64 = 0;
         loop {
             match udp.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
+                    pkt_count += 1;
+                    
+                    // Try voice packet first
                     if let Some((room_id, user_id, seq)) = voice::decode_header(&buf[..len]) {
                         let registered = rooms_voice
                             .register_voice_addr(room_id, user_id, addr)
@@ -52,10 +56,9 @@ async fn main() -> Result<()> {
 
                         let peers = rooms_voice.get_voice_peers(room_id, user_id).await;
 
-                        pkt_count += 1;
                         if pkt_count % 250 == 1 {
                             info!(
-                                "UDP: pkt#{pkt_count} from {addr} room={room_id} user={user_id} seq={seq} len={len} registered={registered} peers={}",
+                                "UDP: voice pkt#{pkt_count} from {addr} room={room_id} user={user_id} seq={seq} len={len} registered={registered} peers={}",
                                 peers.len()
                             );
                         }
@@ -63,6 +66,27 @@ async fn main() -> Result<()> {
                         for peer_addr in peers {
                             if let Err(e) = udp.send_to(&buf[..len], peer_addr).await {
                                 warn!("UDP forward to {peer_addr} failed: {e}");
+                            }
+                        }
+                    }
+                    // Try screen packet
+                    else if let Some((room_id, user_id, frame_id, frag_idx, frag_count, is_keyframe)) = screen::decode_header(&buf[..len]) {
+                        let _registered = rooms_voice
+                            .register_voice_addr(room_id, user_id, addr)
+                            .await;
+
+                        let peers = rooms_voice.get_voice_peers(room_id, user_id).await;
+
+                        if pkt_count % 100 == 1 {
+                            info!(
+                                "UDP: screen pkt#{pkt_count} from {addr} room={room_id} user={user_id} frame={frame_id} frag={frag_idx}/{frag_count} keyframe={is_keyframe} len={len} peers={}",
+                                peers.len()
+                            );
+                        }
+
+                        for peer_addr in peers {
+                            if let Err(e) = udp.send_to(&buf[..len], peer_addr).await {
+                                warn!("UDP screen forward to {peer_addr} failed: {e}");
                             }
                         }
                     }
@@ -176,6 +200,38 @@ async fn handle_client(
                             from: username.clone(),
                             text,
                             ts,
+                        },
+                    )
+                    .await;
+            }
+            Ok(ClientMessage::StartScreenShare) => {
+                match rooms.start_screen_share(&room_name, &username).await {
+                    Ok(()) => {
+                        rooms
+                            .broadcast(
+                                &room_name,
+                                &username,
+                                ServerMessage::ScreenShareStarted {
+                                    username: username.clone(),
+                                },
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = direct_tx.send(ServerMessage::Error {
+                            message: format!("Screen sharing failed: {}", e),
+                        });
+                    }
+                }
+            }
+            Ok(ClientMessage::StopScreenShare) => {
+                let _ = rooms.stop_screen_share(&room_name, &username).await;
+                rooms
+                    .broadcast(
+                        &room_name,
+                        &username,
+                        ServerMessage::ScreenShareStopped {
+                            username: username.clone(),
                         },
                     )
                     .await;

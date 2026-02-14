@@ -6,6 +6,8 @@ mod devices;
 mod hotkeys;
 mod jitter;
 mod net;
+mod screen_capture;
+mod screen_decode;
 mod settings;
 mod tray;
 mod ui;

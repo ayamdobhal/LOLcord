@@ -1,7 +1,9 @@
 use crate::audio::AudioState;
 use crate::crypto;
 use crate::jitter::JitterBuffer;
-use shared::voice;
+use crate::screen_capture::ScreenCaptureState;
+use crate::screen_decode::ScreenDecoder;
+use shared::{voice, screen};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{
@@ -49,6 +51,8 @@ pub async fn run(
     user_volumes: Arc<Mutex<HashMap<u16, f32>>>,
     encryption_key: Option<[u8; 32]>,
     upload_stats: Arc<UploadStats>,
+    screen_capture: Option<Arc<ScreenCaptureState>>,
+    screen_decoder: Option<Arc<ScreenDecoder>>,
 ) {
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => Arc::new(s),
@@ -59,6 +63,31 @@ pub async fn run(
     };
 
     info!("voice UDP bound to {:?}, encrypted={}", socket.local_addr(), encryption_key.is_some());
+
+    // Screen capture activation task
+    let _capture_socket = socket.clone();
+    let capture_handle = if let Some(ref sc) = screen_capture {
+        let sc_clone = sc.clone();
+        Some(tokio::spawn(async move {
+            let _last_check = std::time::Instant::now();
+            let check_interval = std::time::Duration::from_millis(100);
+            
+            loop {
+                tokio::time::sleep(check_interval).await;
+                
+                // Check if we should start screen capture
+                if sc_clone.capturing.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Capture should already be running
+                    continue;
+                }
+                
+                // For now, we'll handle the capture start/stop through server messages
+                // This task can be used for periodic cleanup or status checks
+            }
+        }))
+    } else {
+        None
+    };
 
     // Send task
     let send_socket = socket.clone();
@@ -108,43 +137,54 @@ pub async fn run(
         }
     });
 
-    // Receive task — insert into jitter buffer
+    // Receive task — insert voice into jitter buffer, screen packets into decoder
     let recv_socket = socket.clone();
     let recv_jitter = jitter.clone();
     let recv_key = encryption_key;
+    let recv_decoder = screen_decoder.clone();
     let recv_handle = tokio::spawn(async move {
-        let mut buf = [0u8; voice::MAX_PACKET_SIZE + 40]; // extra room for nonce+tag
+        const MAX_BUF_SIZE: usize = 2048; // Large enough for both voice and screen packets
+        let mut buf = [0u8; MAX_BUF_SIZE];
         loop {
             match recv_socket.recv_from(&mut buf).await {
                 Ok((len, _addr)) => {
-                    if len <= voice::HEADER_SIZE {
-                        continue;
-                    }
-                    if let Some((_rid, uid, seq)) = voice::decode_header(&buf[..len]) {
-                        if uid == user_id {
-                            continue;
-                        }
-                        let encrypted_payload = &buf[voice::HEADER_SIZE..len];
+                    // Try voice packet first
+                    if len > voice::HEADER_SIZE {
+                        if let Some((_rid, uid, seq)) = voice::decode_header(&buf[..len]) {
+                            if uid != user_id {
+                                let encrypted_payload = &buf[voice::HEADER_SIZE..len];
 
-                        let opus_data = if let Some(ref key) = recv_key {
-                            match crypto::decrypt(key, encrypted_payload) {
-                                Ok(decrypted) => decrypted,
-                                Err(_) => {
-                                    // Decryption failed — wrong key or corrupted
-                                    continue;
+                                let opus_data = if let Some(ref key) = recv_key {
+                                    match crypto::decrypt(key, encrypted_payload) {
+                                        Ok(decrypted) => decrypted,
+                                        Err(_) => continue,
+                                    }
+                                } else {
+                                    encrypted_payload.to_vec()
+                                };
+
+                                if let Ok(mut jb) = recv_jitter.lock() {
+                                    jb.insert(uid, seq, opus_data);
                                 }
                             }
-                        } else {
-                            encrypted_payload.to_vec()
-                        };
-
-                        if let Ok(mut jb) = recv_jitter.lock() {
-                            jb.insert(uid, seq, opus_data);
+                            continue;
+                        }
+                    }
+                    
+                    // Try screen packet
+                    if len > screen::HEADER_SIZE {
+                        if screen::decode_header(&buf[..len]).is_some() {
+                            // Forward to screen decoder
+                            if let Some(ref decoder) = recv_decoder {
+                                if let Err(e) = decoder.process_packet(&buf[..len]).await {
+                                    warn!("Screen packet decode error: {}", e);
+                                }
+                            }
                         }
                     }
                 }
                 Err(e) => {
-                    error!("voice recv error: {e}");
+                    error!("UDP recv error: {e}");
                     break;
                 }
             }
@@ -180,9 +220,18 @@ pub async fn run(
         }
     });
 
-    tokio::select! {
-        _ = send_handle => {},
-        _ = recv_handle => {},
-        _ = play_handle => {},
+    if let Some(capture_handle) = capture_handle {
+        tokio::select! {
+            _ = send_handle => {},
+            _ = recv_handle => {},
+            _ = play_handle => {},
+            _ = capture_handle => {},
+        }
+    } else {
+        tokio::select! {
+            _ = send_handle => {},
+            _ = recv_handle => {},
+            _ = play_handle => {},
+        }
     }
 }

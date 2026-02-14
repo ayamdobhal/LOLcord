@@ -20,6 +20,8 @@ struct Room {
     room_id: u16,
     password: Option<String>,
     members: HashMap<String, Member>,
+    /// Username of the current screen sharer, if any
+    screen_sharer: Option<String>,
 }
 
 impl Room {
@@ -28,6 +30,7 @@ impl Room {
             room_id,
             password,
             members: HashMap::new(),
+            screen_sharer: None,
         }
     }
 }
@@ -183,5 +186,43 @@ impl RoomManager {
             }
         }
         Vec::new()
+    }
+
+    /// Try to start screen sharing for a user. Returns Ok(()) if successful,
+    /// Err if someone else is already sharing.
+    pub async fn start_screen_share(&self, room_name: &str, username: &str) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        if let Some(room) = rooms.get_mut(room_name) {
+            match &room.screen_sharer {
+                Some(current_sharer) if current_sharer != username => {
+                    bail!("screen sharing already active by {}", current_sharer);
+                }
+                _ => {
+                    room.screen_sharer = Some(username.to_string());
+                    info!("{username} started screen sharing in room '{room_name}'");
+                    Ok(())
+                }
+            }
+        } else {
+            bail!("room not found");
+        }
+    }
+
+    /// Stop screen sharing for a user.
+    pub async fn stop_screen_share(&self, room_name: &str, username: &str) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        if let Some(room) = rooms.get_mut(room_name) {
+            if room.screen_sharer.as_deref() == Some(username) {
+                room.screen_sharer = None;
+                info!("{username} stopped screen sharing in room '{room_name}'");
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the current screen sharer for a room.
+    pub async fn get_screen_sharer(&self, room_name: &str) -> Option<String> {
+        let rooms = self.rooms.read().await;
+        rooms.get(room_name)?.screen_sharer.clone()
     }
 }

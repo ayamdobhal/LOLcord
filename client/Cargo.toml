@@ -31,3 +31,5 @@ rand = "0.8"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 dirs = "5"
+scrap = "0.5"
+openh264 = "0.6"

@@ -14,6 +14,8 @@ pub enum ClientMessage {
     Chat {
         text: String,
     },
+    StartScreenShare,
+    StopScreenShare,
     Ping {
         ts: u64,
     },
@@ -48,6 +50,12 @@ pub enum ServerMessage {
         from: String,
         text: String,
         ts: u64,
+    },
+    ScreenShareStarted {
+        username: String,
+    },
+    ScreenShareStopped {
+        username: String,
     },
     Error {
         message: String,
@@ -144,4 +152,50 @@ pub mod voice {
 }
 
 // voice module above provides packet encoding/decoding
+
+/// Screen sharing UDP packet constants and helpers.
+pub mod screen {
+    /// Magic bytes to distinguish screen packets from voice packets
+    pub const MAGIC_BYTES: [u8; 2] = [0xFF, 0xFE];
+    /// Fragment size for screen packets (MTU-safe)
+    pub const FRAGMENT_SIZE: usize = 1200;
+    /// Maximum screen packet size
+    pub const MAX_PACKET_SIZE: usize = FRAGMENT_SIZE + 64; // extra space for headers
+    /// Screen packet header size
+    pub const HEADER_SIZE: usize = 2 + 2 + 2 + 4 + 2 + 2 + 1; // magic + room_id + user_id + frame_id + frag_idx + frag_count + is_keyframe
+
+    /// Encode screen packet header
+    pub fn encode_header(
+        room_id: u16,
+        user_id: u16,
+        frame_id: u32,
+        fragment_idx: u16,
+        fragment_count: u16,
+        is_keyframe: bool,
+    ) -> [u8; HEADER_SIZE] {
+        let mut buf = [0u8; HEADER_SIZE];
+        buf[0..2].copy_from_slice(&MAGIC_BYTES);
+        buf[2..4].copy_from_slice(&room_id.to_be_bytes());
+        buf[4..6].copy_from_slice(&user_id.to_be_bytes());
+        buf[6..10].copy_from_slice(&frame_id.to_be_bytes());
+        buf[10..12].copy_from_slice(&fragment_idx.to_be_bytes());
+        buf[12..14].copy_from_slice(&fragment_count.to_be_bytes());
+        buf[14] = if is_keyframe { 1 } else { 0 };
+        buf
+    }
+
+    /// Decode screen packet header. Returns None if not a screen packet.
+    pub fn decode_header(buf: &[u8]) -> Option<(u16, u16, u32, u16, u16, bool)> {
+        if buf.len() < HEADER_SIZE || &buf[0..2] != &MAGIC_BYTES {
+            return None;
+        }
+        let room_id = u16::from_be_bytes([buf[2], buf[3]]);
+        let user_id = u16::from_be_bytes([buf[4], buf[5]]);
+        let frame_id = u32::from_be_bytes([buf[6], buf[7], buf[8], buf[9]]);
+        let fragment_idx = u16::from_be_bytes([buf[10], buf[11]]);
+        let fragment_count = u16::from_be_bytes([buf[12], buf[13]]);
+        let is_keyframe = buf[14] != 0;
+        Some((room_id, user_id, frame_id, fragment_idx, fragment_count, is_keyframe))
+    }
+}
 

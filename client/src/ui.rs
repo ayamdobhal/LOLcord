@@ -3,6 +3,8 @@ use crate::devices::{self, DeviceInfo};
 use crate::hotkeys::{self, PttBind};
 use crate::jitter::JitterBuffer;
 use crate::net::Connection;
+use crate::screen_capture::ScreenCaptureState;
+use crate::screen_decode::ScreenDecoder;
 use crate::settings::Settings;
 use iced::widget::{
     button, column, container, image, row, scrollable, text, text_input, 
@@ -74,6 +76,10 @@ pub enum Message {
     // Settings
     SettingsPressed,
     SettingsClosePressed,
+    
+    // Screen sharing
+    ToggleScreenShare,
+    ToggleScreenView,
 }
 
 /// Result of a connection attempt, sent back to the UI
@@ -179,6 +185,13 @@ enum Screen {
         encryption_key: Option<[u8; 32]>,
         connect_params: Option<ReconnectParams>,
         reconnect_state: ReconnectState,
+        // Screen sharing
+        screen_capture: Option<Arc<ScreenCaptureState>>,
+        screen_decoder: Option<Arc<ScreenDecoder>>,
+        current_screen_sharer: Option<String>,
+        show_screen_view: bool, // Toggle between chat and screen view
+        self_preview_image: Option<iced::widget::image::Handle>,
+        remote_screen_image: Option<iced::widget::image::Handle>,
     },
 }
 
@@ -398,6 +411,16 @@ impl Application for App {
                         let user_volumes: Arc<Mutex<HashMap<u16, f32>>> = Arc::new(Mutex::new(HashMap::new()));
                         let upload_stats = Arc::new(crate::voice::UploadStats::new());
 
+                        // Initialize screen sharing components
+                        let screen_capture = Some(Arc::new(ScreenCaptureState::new()));
+                        let screen_decoder = match ScreenDecoder::new() {
+                            Ok(decoder) => Some(Arc::new(decoder)),
+                            Err(e) => {
+                                tracing::error!("Failed to create screen decoder: {}", e);
+                                None
+                            }
+                        };
+
                         // Start audio engine
                         let (audio, streams) = match audio::start_audio(in_idx, out_idx) {
                             Ok((state, input_stream, output_stream)) => {
@@ -410,9 +433,11 @@ impl Application for App {
                                     voice_port
                                 );
                                 let upload_stats_clone = upload_stats.clone();
+                                let screen_capture_clone = screen_capture.clone();
+                                let screen_decoder_clone = screen_decoder.clone();
                                 self.runtime.spawn(async move {
                                     if let Ok(addr) = voice_addr_str.parse() {
-                                        crate::voice::run(audio_clone, addr, room_id, user_id, jitter_clone, volumes_clone, encryption_key, upload_stats_clone).await;
+                                        crate::voice::run(audio_clone, addr, room_id, user_id, jitter_clone, volumes_clone, encryption_key, upload_stats_clone, screen_capture_clone, screen_decoder_clone).await;
                                     }
                                 });
                                 (Some(state), Some((input_stream, output_stream)))
@@ -499,6 +524,13 @@ impl Application for App {
                             jitter: jitter.clone(),
                             quality_stats: HashMap::new(),
                             quality_update: Instant::now(),
+                            // Screen sharing fields
+                            screen_capture,
+                            screen_decoder,
+                            current_screen_sharer: None,
+                            show_screen_view: false,
+                            self_preview_image: None,
+                            remote_screen_image: None,
                         };
                     }
                     ConnectResult::Err(msg) => {
@@ -582,6 +614,10 @@ impl Application for App {
                     user_id_map, 
                     latency_ms,
                     encryption_key,
+                    current_screen_sharer,
+                    screen_capture,
+                    username,
+                    show_screen_view,
                     .. 
                 } = &mut self.state {
                     match msg {
@@ -627,6 +663,41 @@ impl Application for App {
                                 .unwrap()
                                 .as_millis() as u64;
                             *latency_ms = Some((now.saturating_sub(ts)) as u32);
+                        }
+                        ServerMessage::ScreenShareStarted { username: sharer } => {
+                            *current_screen_sharer = Some(sharer.clone());
+                            messages.push(ChatMsg {
+                                from: "system".into(),
+                                text: format!("{} started screen sharing", sharer),
+                            });
+                            
+                            // If we're the sharer, start capture
+                            if sharer == *username {
+                                // TODO: Start actual screen capture
+                                // For now, we'll just mark the flag - the actual implementation would require 
+                                // passing server address, room_id, user_id to screen capture
+                                tracing::info!("Starting screen capture for user {}", sharer);
+                            } else {
+                                // Switch to screen view to watch the stream
+                                *show_screen_view = true;
+                            }
+                        }
+                        ServerMessage::ScreenShareStopped { username: sharer } => {
+                            if current_screen_sharer.as_ref() == Some(&sharer) {
+                                *current_screen_sharer = None;
+                                *show_screen_view = false;
+                                
+                                // If we were the sharer, stop capture
+                                if &sharer == username {
+                                    if let Some(ref capture) = screen_capture {
+                                        capture.stop_capture();
+                                    }
+                                }
+                            }
+                            messages.push(ChatMsg {
+                                from: "system".into(),
+                                text: format!("{} stopped screen sharing", sharer),
+                            });
                         }
                         _ => {}
                     }
@@ -822,6 +893,37 @@ impl Application for App {
             }
             Message::SettingsClosePressed => {
                 self.show_settings = false;
+            }
+            Message::ToggleScreenShare => {
+                if let Screen::Connected { 
+                    screen_capture, 
+                    client_tx, 
+                    username, 
+                    current_screen_sharer,
+                    .. 
+                } = &mut self.state {
+                    if let Some(ref capture) = screen_capture {
+                        if capture.capturing.load(std::sync::atomic::Ordering::Relaxed) {
+                            // Stop sharing
+                            capture.stop_capture();
+                            let _ = client_tx.send(ClientMessage::StopScreenShare);
+                        } else {
+                            // Start sharing - send request to server first
+                            if current_screen_sharer.is_none() || current_screen_sharer.as_ref() == Some(username) {
+                                let _ = client_tx.send(ClientMessage::StartScreenShare);
+                                // Note: Actual capture will start when we get ScreenShareStarted confirmation
+                            }
+                        }
+                    }
+                }
+            }
+            Message::ToggleScreenView => {
+                if let Screen::Connected { show_screen_view, current_screen_sharer, .. } = &mut self.state {
+                    // Only toggle if someone is sharing
+                    if current_screen_sharer.is_some() {
+                        *show_screen_view = !*show_screen_view;
+                    }
+                }
             }
         }
 
@@ -1085,6 +1187,11 @@ impl App {
             reconnect_state,
             ptt_bind_name,
             listening_for_ptt,
+            screen_capture,
+            current_screen_sharer,
+            show_screen_view,
+            self_preview_image: _,
+            remote_screen_image,
             ..
         } = &self.state {
             
@@ -1210,8 +1317,17 @@ impl App {
                     .on_press(Message::ToggleDeafen)
                     .padding(4);
 
+                // Screen share button
+                let is_sharing = screen_capture.as_ref()
+                    .map(|sc| sc.capturing.load(Ordering::Relaxed))
+                    .unwrap_or(false);
+                let share_btn_text = if is_sharing { "Stop Share" } else { "Share Screen" };
+                let share_btn = button(text(share_btn_text))
+                    .on_press(Message::ToggleScreenShare)
+                    .padding(4);
+
                 audio_controls = audio_controls.push(
-                    row![mute_btn, deaf_btn].spacing(5)
+                    row![mute_btn, deaf_btn, share_btn].spacing(5)
                 );
 
                 // Transmit indicator
@@ -1296,7 +1412,7 @@ impl App {
             .width(Length::Fill)
             .center_x();
 
-            // Settings panel (replaces chat when open)
+            // Right panel: Settings, Screen View, or Chat
             let right_side: Element<Message> = if self.show_settings {
                 let mut settings = column![
                     text("Settings").size(20),
@@ -1364,11 +1480,71 @@ impl App {
                 settings = settings.push(button("Close Settings").on_press(Message::SettingsClosePressed));
 
                 scrollable(settings).height(Length::Fill).into()
+            } else if *show_screen_view && current_screen_sharer.is_some() {
+                // Screen sharing view
+                let mut screen_content = column![]
+                    .spacing(10)
+                    .padding(10)
+                    .width(Length::Fill);
+                    
+                // Screen view header
+                let sharer_name = current_screen_sharer.as_ref().unwrap();
+                screen_content = screen_content.push(
+                    row![
+                        text(format!("{}'s Screen", sharer_name)).size(18),
+                        Space::with_width(Length::Fill),
+                        button("Back to Chat").on_press(Message::ToggleScreenView),
+                    ]
+                    .align_items(Alignment::Center)
+                );
+                
+                // Screen display area
+                if sharer_name == username {
+                    // Self preview
+                    screen_content = screen_content.push(
+                        container(text("Your screen (preview)"))
+                            .center_x()
+                            .center_y()
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                    );
+                } else {
+                    // Remote screen
+                    if let Some(ref image_handle) = remote_screen_image {
+                        screen_content = screen_content.push(
+                            container(image(image_handle.clone()))
+                                .center_x()
+                                .center_y()
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                        );
+                    } else {
+                        screen_content = screen_content.push(
+                            container(text("Waiting for screen stream..."))
+                                .center_x()
+                                .center_y()
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                        );
+                    }
+                }
+                
+                screen_content.into()
             } else {
-                column![
-                    chat_area,
-                    input_bar,
-                ].width(Length::Fill).into()
+                // Chat view
+                let mut chat_controls = column![chat_area];
+                
+                // Add screen view toggle button if someone is sharing
+                if current_screen_sharer.is_some() {
+                    let toggle_btn = button("View Screen Share")
+                        .on_press(Message::ToggleScreenView);
+                    chat_controls = chat_controls.push(
+                        container(toggle_btn).padding(5).center_x()
+                    );
+                }
+                
+                chat_controls = chat_controls.push(input_bar);
+                chat_controls.width(Length::Fill).into()
             };
 
             let main_content = column![
