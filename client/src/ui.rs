@@ -1058,15 +1058,21 @@ impl App {
             };
 
             // Top bar
-            let top_bar = row![
-                text("LOLcord").size(18),
-                Space::with_width(Length::Fill),
-                text(format!("# {}", room)).size(16),
-                Space::with_width(Length::Fill),
-                button("⚙").on_press(Message::SettingsPressed)
-            ]
-            .padding(10)
-            .align_items(Alignment::Center);
+            let logo = image(image::Handle::from_bytes(include_bytes!("../assets/logo.png").to_vec()))
+                .width(28).height(28);
+            let top_bar = container(
+                row![
+                    logo,
+                    text("LOLcord").size(18),
+                    Space::with_width(Length::Fill),
+                    text(format!("# {}", room)).size(16),
+                    Space::with_width(Length::Fill),
+                    button("Settings").on_press(Message::SettingsPressed)
+                ]
+                .spacing(8)
+                .padding(10)
+                .align_items(Alignment::Center)
+            ).style(iced::theme::Container::default());
 
             // Left sidebar - Users panel
             let mut user_list = column![]
@@ -1126,18 +1132,24 @@ impl App {
                 let is_deaf = a.deafened.load(Ordering::Relaxed);
                 let is_vad = a.vad_active.load(Ordering::Relaxed);
 
-                // Mute/Deafen buttons
-                let mute_btn = if is_muted {
-                    button("🔇").on_press(Message::ToggleMute)
+                // Mute/Deafen buttons (custom icons)
+                let mic_icon: iced::widget::Image = if is_muted {
+                    image(image::Handle::from_bytes(include_bytes!("../assets/mic_off.png").to_vec()))
                 } else {
-                    button("🎤").on_press(Message::ToggleMute)
+                    image(image::Handle::from_bytes(include_bytes!("../assets/mic_on.png").to_vec()))
+                };
+                let deaf_icon: iced::widget::Image = if is_deaf {
+                    image(image::Handle::from_bytes(include_bytes!("../assets/deaf_on.png").to_vec()))
+                } else {
+                    image(image::Handle::from_bytes(include_bytes!("../assets/deaf_off.png").to_vec()))
                 };
 
-                let deaf_btn = if is_deaf {
-                    button("🙉").on_press(Message::ToggleDeafen)
-                } else {
-                    button("🎧").on_press(Message::ToggleDeafen)
-                };
+                let mute_btn = button(mic_icon.width(24).height(24))
+                    .on_press(Message::ToggleMute)
+                    .padding(4);
+                let deaf_btn = button(deaf_icon.width(24).height(24))
+                    .on_press(Message::ToggleDeafen)
+                    .padding(4);
 
                 audio_controls = audio_controls.push(
                     row![mute_btn, deaf_btn].spacing(5)
@@ -1247,7 +1259,10 @@ impl App {
                     .on_input(Message::MessageInputChanged)
                     .on_submit(Message::SendMessage)
                     .width(Length::Fill),
-                button("Send").on_press(Message::SendMessage)
+                button(
+                    image(image::Handle::from_bytes(include_bytes!("../assets/send.png").to_vec()))
+                        .width(20).height(20)
+                ).on_press(Message::SendMessage).padding(4)
             ]
             .spacing(5)
             .padding(10)
