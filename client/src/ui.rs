@@ -1333,15 +1333,86 @@ impl App {
             .width(Length::Fill)
             .center_x();
 
+            // Settings panel (replaces chat when open)
+            let right_side: Element<Message> = if self.show_settings {
+                let mut settings = column![
+                    text("Settings").size(20),
+                    Space::with_height(10),
+                ].spacing(8).padding(15).width(Length::Fill);
+
+                if let Some(ref a) = audio {
+                    // Voice mode
+                    let open_mic_label = if *use_open_mic { "> Open Mic" } else { "  Open Mic" };
+                    let ptt_label = if !*use_open_mic { "> Push to Talk" } else { "  Push to Talk" };
+                    settings = settings.push(text("Voice Mode:").size(14));
+                    settings = settings.push(button(open_mic_label).on_press(Message::ToggleOpenMic));
+                    settings = settings.push(button(ptt_label).on_press(Message::ToggleOpenMic));
+
+                    // VAD sensitivity
+                    if *use_open_mic {
+                        let thresh = a.vad_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
+                        let sens = 1.0 - (thresh - 0.001) / 0.099;
+                        settings = settings.push(
+                            row![
+                                text("Sensitivity:").size(12),
+                                slider(0.0..=1.0, sens, Message::VadSensitivityChanged).width(150)
+                            ].spacing(8).align_items(Alignment::Center)
+                        );
+                    }
+
+                    // PTT keybind
+                    if !*use_open_mic {
+                        let btn_text = if *listening_for_ptt {
+                            "Press any key... (Esc to cancel)".to_string()
+                        } else {
+                            format!("PTT: {}", ptt_bind_name)
+                        };
+                        settings = settings.push(button(text(&btn_text)).on_press(Message::PttBindPressed));
+                    }
+
+                    settings = settings.push(Space::with_height(5));
+
+                    // Noise suppression
+                    let ns_on = a.noise_suppression.load(Ordering::Relaxed);
+                    let ns_label = if ns_on { "Noise Suppression: ON" } else { "Noise Suppression: OFF" };
+                    settings = settings.push(button(ns_label).on_press(Message::ToggleNoiseSupression));
+
+                    // Noise gate
+                    let ng_on = a.noise_gate_enabled.load(Ordering::Relaxed);
+                    let ng_label = if ng_on { "Noise Gate: ON" } else { "Noise Gate: OFF" };
+                    settings = settings.push(button(ng_label).on_press(Message::ToggleNoiseGate));
+                    if ng_on {
+                        let thresh = a.noise_gate_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
+                        settings = settings.push(
+                            row![
+                                text("Gate:").size(12),
+                                slider(0.001..=0.05, thresh, Message::NoiseGateThresholdChanged).width(150)
+                            ].spacing(8).align_items(Alignment::Center)
+                        );
+                    }
+
+                    // Loopback
+                    let lb_on = a.loopback.load(Ordering::Relaxed);
+                    let lb_label = if lb_on { "Loopback: ON" } else { "Loopback: OFF" };
+                    settings = settings.push(button(lb_label).on_press(Message::ToggleLoopback));
+                }
+
+                settings = settings.push(Space::with_height(10));
+                settings = settings.push(button("Close Settings").on_press(Message::SettingsClosePressed));
+
+                scrollable(settings).height(Length::Fill).into()
+            } else {
+                column![
+                    chat_area,
+                    input_bar,
+                ].width(Length::Fill).into()
+            };
+
             let main_content = column![
                 top_bar,
                 row![
                     sidebar,
-                    column![
-                        chat_area,
-                        input_bar,
-                    ]
-                    .width(Length::Fill)
+                    right_side,
                 ]
                 .height(Length::Fill),
                 status_bar,
