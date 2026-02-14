@@ -1201,68 +1201,9 @@ impl App {
                     audio_controls = audio_controls.push(text(">> TRANSMITTING"));
                 }
 
-                // Voice mode toggle
-                audio_controls = audio_controls.push(
-                    column![
-                        button("Open Mic").on_press(Message::ToggleOpenMic),
-                        button("Push to Talk").on_press(Message::ToggleOpenMic),
-                    ].spacing(2)
-                );
-
-                // VAD sensitivity (only in open mic mode)
-                if *use_open_mic {
-                    let thresh = a.vad_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
-                    let sens = 1.0 - (thresh - 0.001) / 0.099;
-                    audio_controls = audio_controls.push(
-                        column![
-                            text("Sensitivity:").size(12),
-                            slider(0.0..=1.0, sens, Message::VadSensitivityChanged)
-                                .width(80)
-                        ].spacing(2)
-                    );
-                }
-
-                // PTT key selector (only show when PTT mode)
-                if !*use_open_mic {
-                    let btn_text = if *listening_for_ptt {
-                        "Press any key... (Esc to cancel)".to_string()
-                    } else {
-                        format!("PTT: {}", ptt_bind_name)
-                    };
-                    
-                    audio_controls = audio_controls.push(
-                        button(text(&btn_text)).on_press(Message::PttBindPressed)
-                    );
-                }
-
-                // Noise suppression toggle
-                let ns_on = a.noise_suppression.load(Ordering::Relaxed);
-                audio_controls = audio_controls.push(
-                    button("Noise Suppression").on_press(Message::ToggleNoiseSupression)
-                );
-
-                // Noise gate toggle + threshold slider
-                let ng_on = a.noise_gate_enabled.load(Ordering::Relaxed);
-                audio_controls = audio_controls.push(
-                    button("Noise Gate").on_press(Message::ToggleNoiseGate)
-                );
-                
-                if ng_on {
-                    let thresh = a.noise_gate_threshold.load(Ordering::Relaxed) as f32 / 10000.0;
-                    audio_controls = audio_controls.push(
-                        column![
-                            text("Gate:").size(12),
-                            slider(0.001..=0.05, thresh, Message::NoiseGateThresholdChanged)
-                                .width(80)
-                        ].spacing(2)
-                    );
-                }
-                // Loopback (hear yourself)
-                let lb_on = a.loopback.load(Ordering::Relaxed);
-                let lb_label = if lb_on { "Loopback: ON" } else { "Loopback: OFF" };
-                audio_controls = audio_controls.push(
-                    button(lb_label).on_press(Message::ToggleLoopback)
-                );
+                // Voice mode indicator
+                let mode_text = if *use_open_mic { "Open Mic" } else { "PTT" };
+                audio_controls = audio_controls.push(text(mode_text).size(11));
             } else {
                 audio_controls = audio_controls.push(text("! No audio"));
             }
